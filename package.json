@@ -1,0 +1,22 @@
+{
+    "name": "culinary-agents-scraper",
+    "version": "1.1.0",
+    "type": "module",
+    "description": "A Crawlee-based scraper for Culinary Agents to extract job listings and save them to Google Sheets.",
+    "dependencies": {
+        "crawlee": "^3.11.5",
+        "googleapis": "^146.0.0",
+        "cheerio": "^1.0.0-rc.12",
+        "node-fetch": "^3.3.2"
+    },
+    "devDependencies": {
+        "@apify/eslint-config": "^0.4.0",
+        "eslint": "^8.50.0"
+    },
+    "scripts": {
+        "start": "node src/main.js",
+        "test": "echo \"Error: oops, the actor has no tests yet, sad!\" && exit 1"
+    },
+    "author": "ajgilbert2",
+    "license": "ISC"
+}

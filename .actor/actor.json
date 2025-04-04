@@ -1,0 +1,14 @@
+{
+  "actorSpecification": 1,
+  "name": "culinary-agents-scraper",
+  "title": "Culinary Agents Scraper",
+  "description": "A scraper for Culinary Agents to extract job listings and save them to Google Sheets",
+  "version": "0.1",
+  "dockerfile": "./Dockerfile",
+  "input": {
+    "title": "Input schema for Culinary Agents Scraper",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {}
+  }
+}
