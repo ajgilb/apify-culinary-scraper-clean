@@ -1,13 +1,15 @@
 {
     "name": "culinary-agents-scraper",
-    "version": "1.1.0",
+    "version": "1.1",
     "type": "module",
-    "description": "A Crawlee-based scraper for Culinary Agents to extract job listings and save them to Google Sheets.",
+    "description": "A Crawlee-based scraper for Culinary Agents to extract job listings and save them to Database.",
     "dependencies": {
-        "crawlee": "^3.11.5",
-        "googleapis": "^146.0.0",
+        "apify": "^3.1.16",
         "cheerio": "^1.0.0-rc.12",
-        "node-fetch": "^3.3.2"
+        "crawlee": "^3.11.5",
+        "dotenv": "^16.4.7",
+        "node-fetch": "^3.3.2",
+        "pg": "^8.14.1"
     },
     "devDependencies": {
         "@apify/eslint-config": "^0.4.0",

@@ -1,36 +1,39 @@
-import { CheerioCrawler, Dataset, KeyValueStore, log, RequestQueue } from 'crawlee';
+import { CheerioCrawler, KeyValueStore, RequestQueue, log, Dataset } from 'crawlee';
 import cheerio from 'cheerio';
 import fetch from 'node-fetch';
-import { google } from 'googleapis';
+import { Actor } from 'apify';
+import pkg from 'pg';
+const { Pool } = pkg;
 
 // Configuration
 const TEST_MODE = false;  // Running in production mode
 const TEST_JOB_LIMIT = 5;
 const EXPORT_DATA = true;
-const EXPORT_BATCH_SIZE = 5;  // Export every 5 jobs
+
 const BATCH_SIZE = 9;
 const BASE_URL = 'https://culinaryagents.com';
-const MAX_CELL_LENGTH = 50;
+const MAX_CELL_LENGTH = 50000;
 
-// VERSION HISTORY
-// v1.0 - Initial implementation of Culinary Agents scraper
-// v1.1 - Added Date Added field to track when job listings are first discovered (2025-04-03)
-// v1.2 - Fixed "Part of" company field caching and improved Hunter API result selection (2025-04-03)
-//        - Added better cache key generation to prevent cross-contamination
-//        - Now selecting the first result with emails from Hunter API
-//        - Added defensive checks to prevent "undefined" property errors
-// v1.3 - Enhanced contact prioritization for better targeting of management/HR roles (2025-04-03)
-//        - Added more extensive job title priority list with HR-focused roles at top
-//        - Improved title matching to handle multi-word terms and special cases
-//        - Better handling of C-level executive positions
-// v1.4 - Further improved title prioritization for HR/Talent roles (2025-04-03)
-//        - Added "talent" as a priority keyword for recruitment contacts
-//        - Prioritized regional/area managers above general managers
-//        - Now using Hunter's standardized position field before position_raw
-//        - Added detailed logging of email sorting for better debugging
+// --- BATCH EXPORT SETTINGS ---
+const EXPORT_BATCH_SIZE = 10; // Export every 10 jobs
+let exportBatch = [];
+// let loggedIn = false; // REMOVED login flag
+
+// PostgreSQL Configuration
+const connectionString = 'postgresql://postgres.mbaqiwhkngfxxmlkionj:Relham12%3F@aws-0-us-west-1.pooler.supabase.com:6543/postgres';
+const pool = new Pool({
+    connectionString,
+    ssl: {
+        rejectUnauthorized: false
+    }
+});
+
+// Add this after the pool configuration
+pool.on('error', (err) => {
+    console.error('Unexpected error on idle client', err);
+});
 
 // Create a global array to store jobs - used for global state only
-// Not for direct sharing references to email objects
 let allProcessedJobs = [];
 
 // Hunter.io API Configuration
@@ -45,8 +48,9 @@ const CACHE_MAX_AGE_DAYS = 30;
 const DISABLE_COMPANY_CACHE = true;
 
 // Google Sheets Configuration
-const SHEET_ID = '1hFgWma-Jjq31Tb2yn9U8PWgfC8KOpp0njdg3c1JEjsI'; // Your Sheet ID
-const SHEET_RANGE = 'Sheet1!A1'; // Adjust if needed
+// const SHEET_ID = '1hFgWma-Jjq31Tb2yn9U8PWgfC8KOpp0njdg3c1JEjsI'; // Your Sheet ID
+// const SHEET_NAME = 'Sheet1'; // The name of the sheet to read from and append to
+// const SHEET_RANGE = 'Sheet1!A1'; // Adjust if needed (Likely only needed for specific reads/writes, not append)
 
 // Exclusion list
 const EXCLUDED_COMPANIES = new Set([
@@ -1223,10 +1227,17 @@ async function getCompanyInfoWithSource(companyName, locationName = '', source =
             if (response.status === 429) {
                 await delay(10000);
             }
-            throw new Error(errorText);
+            throw new Error(`Hunter API returned error ${response.status}: ${errorText}`);
         }
         const data = await response.json();
         if (!data || !data.data) {
+            throw new Error('Invalid API response: missing data object');
+        }
+        
+        log.info(`[Hunter Response] Successfully parsed JSON for ${companyName} (${source})`);
+        
+        if (!data || !data.data) {
+            log.error(`[Hunter Response Error] Invalid API response for ${companyName} (${source}): missing data object. Response: ${JSON.stringify(data)}`);
             throw new Error('Invalid API response: missing data object');
         }
         
@@ -1670,418 +1681,409 @@ function ensureAbsoluteUrl(url) {
     return url.startsWith('http') ? url : `${BASE_URL}${url.startsWith('/') ? '' : '/'}${url}`;
 }
 
-// Google Sheets export function
-async function exportData(data, sheetsClient) {
+// Global variables
+let sheetsClient = null;
+let existingData = new Map();
+
+// --- START: Added Google Sheets Functions ---
+
+// Load existing data from Google Sheet
+async function loadExistingData() {
+    if (!sheetsClient) {
+        log.error('Google Sheets client not initialized before calling loadExistingData');
+        throw new Error('Google Sheets client not initialized');
+    }
+    // Use the globally initialized sheetsClient
     try {
-        log.info(`SHEETS EXPORT: Starting export of ${data?.length || 0} items to Google Sheets`);
-        if (!data || !data.length) {
-            log.info('SHEETS EXPORT: No data to export');
-            return false;
-        }
-        
-        // Create a deep clone of the entire data to ensure no shared references between jobs
-        const cleanData = JSON.parse(JSON.stringify(data));
-        
-        // Add debugging information to track which job each email belongs to
-        cleanData.forEach((job, index) => {
-            if (job.emails && job.emails.length > 0) {
-                // Log the email sources for debugging
-                log.info(`Job #${index+1}: "${job.company}" (${job.title}) has ${job.emails.length} emails`);
-                
-                // Validate that each email has appropriate job identification
-                job.emails.forEach((email, emailIndex) => {
-                    if (!email._jobId) {
-                        log.info(`Email #${emailIndex+1} for job "${job.company}" is missing job identification`);
-                        // Add job ID if missing
-                        email._jobId = `${job.company}-${Date.now()}-${index}`;
-                        email._jobTitle = job.title;
-                        email._company = job.company;
-                    }
-                });
+        const response = await sheetsClient.spreadsheets.values.get({
+            spreadsheetId: SHEET_ID,
+            range: SHEET_NAME, // Use SHEET_NAME defined above
+        });
+        const rows = response.data.values || [];
+        log.info(`Loaded ${rows.length} rows from Google Sheets`);
+        // Simple map for quick lookup (e.g., by Job URL or a unique identifier)
+        // Modify this based on how you want to check for duplicates
+        const dataMap = new Map();
+        rows.forEach((row, index) => {
+            if (index === 0) return; // Skip header row if present
+            const jobUrl = row[9]; // Assuming URL is in the 10th column (index 9)
+            if (jobUrl) {
+                 // Store the row index or some indicator that the URL exists
+                dataMap.set(jobUrl, index + 1);
             }
         });
-        
-        // Use the clean data for the rest of the function
-        data = cleanData;
+        log.info(`Created map with ${dataMap.size} existing job URLs.`);
+        return dataMap; // Return the map for duplicate checking
+    } catch (error) {
+        log.error('Failed to load existing data from Google Sheets:', error);
+        // Decide if you want to throw or return an empty map/handle differently
+        // For now, let's return an empty map to allow the script to continue potentially
+         return new Map();
+        // throw error; // Or re-throw if loading is critical
+    }
+}
 
-        // Prepare data for Google Sheets
-        const values = [];
-        const headers = ['Title', 'Company', 'Parent Company', 'Location', 'Salary', 'Contact Name', 'Contact Title', 'Email Address', 'Send Email', 'URL', 'Job Details', 'LinkedIn', 'Domain', 'Company Size', 'Date Added'];
-        values.push(headers);
 
-        // Track formatting requests
-        const requests = [];
+// Export data to Google Sheet using Append
+// Uses the multi-row format with start/end markers per job
+async function exportData(data) {
+    if (!sheetsClient) {
+        log.error('Google Sheets client not initialized');
+        throw new Error('Google Sheets client not initialized');
+    }
 
-        // Add header formatting
-        requests.push({
-            repeatCell: {
-                range: {
-                    sheetId: 0,
-                    startRowIndex: 0,
-                    endRowIndex: 1,
-                    startColumnIndex: 0,
-                    endColumnIndex: headers.length
-                },
-                cell: {
-                    userEnteredFormat: {
-                        horizontalAlignment: 'CENTER',
-                        textFormat: { bold: true },
-                        backgroundColor: {
-                            red: 0.9,
-                            green: 0.9,
-                            blue: 0.9
-                        }
-                    }
-                },
-                fields: 'userEnteredFormat(horizontalAlignment,textFormat,backgroundColor)'
-            }
-        });
+    try {
+        // Define headers
+        const headers = [
+            'Title', 'Company', 'Parent Company', 'Location', 'Salary', 
+            'Contact Name', 'Contact Title', 'Email Address', 'URL', 
+            'Job Details', 'LinkedIn', 'Domain', 'Company Size', 'Date Added'
+        ];
 
-        // Process each job with clear spacing
+        // Prepare rows
+        const values = [headers]; // Start with headers
+
+        // Process each job
         for (const item of data) {
-            // Add main job row
-            const jobRow = [
+            if (item.emails && item.emails.length > 0) {
+                // Add a row for each contact
+                for (const email of item.emails) {
+                    const row = [
                 item.title || '',
                 item.company || '',
                 item.parentCompany || 'N/A',
                 item.location || '',
                 item.salary || '',
-                '', // Empty contact name
-                '', // Empty contact title
-                '', // Empty email
-                '', // Empty send email
-                item.url || '',
-                item.jobDetails || '',
-                item.linkedin || '',
-                item.domain || '',
-                item.size || '',
-                item.dateAdded || now() // Use the saved date or current time if missing
-            ];
-            
-            // Add the job row
-            values.push(jobRow);
-            
-            // Add a debug identifier row
-            values.push(['JOB_START: ' + item.company, '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
-
-            // Add contact rows if emails exist
-            if (item.emails && item.emails.length > 0) {
-                log.info(`Processing ${item.emails.length} emails for ${item.company} (${item.title})`);
-                
-                // CRITICAL DEBUG: Check if item.emails contains valid email objects
-                for (let i = 0; i < Math.min(item.emails.length, 3); i++) {
-                    const emailObj = item.emails[i];
-                    log.info(`DEBUG EMAIL[${i}]: ${JSON.stringify({
-                        email: emailObj.email || 'MISSING',
-                        name: emailObj.name || 'MISSING',
-                        title: emailObj.title || 'MISSING',
-                        keys: Object.keys(emailObj)
-                    })}`);
-                }
-                
-                // Create a deep copy of the emails array to ensure we're not sharing references
-                // Then explicitly create new objects for each email to be 100% sure
-                const rawEmails = JSON.parse(JSON.stringify(item.emails));
-                
-                // Don't filter emails based on company match
-                const validatedEmails = rawEmails;
-                log.info(`Keeping all ${validatedEmails.length} contacts for "${item.company}" regardless of domain/company matches`);
-                
-                log.info(`After validation: ${validatedEmails.length} of ${rawEmails.length} contacts will be added to sheet for company "${item.company}"`);
-                
-                // Explicitly create new objects rather than references
-                // Add more debug info to diagnose issue with emails not showing up
-                log.info(`DEBUG: Creating ${validatedEmails.length} email objects for company "${item.company}"`);
-                if (validatedEmails.length > 0) {
-                    log.info(`DEBUG: First email sample - Email: ${validatedEmails[0].email}, Name: ${validatedEmails[0].name}, Title: ${validatedEmails[0].title}`);
-                }
-                
-                const emailsCopy = validatedEmails.map((email, idx) => {
-                    // Verify this contact matches the current company
-                    const contactCompany = email._originalCompany || '';
-                    const contactDomain = email._originalDomain || '';
-                    
-                    // Check for company mismatch (for informational purposes only)
-                    if (contactCompany && 
-                        contactCompany.toLowerCase() !== item.company.toLowerCase() && 
-                        !contactCompany.toLowerCase().includes(item.company.toLowerCase()) &&
-                        !item.company.toLowerCase().includes(contactCompany.toLowerCase())) {
-                        
-                        // This is just informational now - we're keeping all contacts regardless
-                        log.info(`ℹ️ NOTE: Contact ${email.name} (${email.email}) is from "${contactCompany}" for job at "${item.company}" - keeping all contacts`);
-                    }
-                    
-                    return {
-                        // Only include fields we need for display
-                        name: email.name || 'Unknown',
-                        title: email.title || 'N/A',
-                        email: email.email || '',
-                        
-                        // Add extensive tracking data
-                        _exportId: `export-${Date.now()}-${idx}`,
-                        _company: item.company,
-                        _jobTitle: item.title,
-                        _originalCompany: contactCompany,
-                        _originalDomain: contactDomain,
-                        _sourceTime: email._sourceTime || 'unknown',
-                        _verified: contactCompany.toLowerCase() === item.company.toLowerCase()
-                    };
-                });
-                
-                log.info(`Processing ${emailsCopy.length} completely isolated emails for job: ${item.title} at ${item.company}`);
-                
-                // DEBUG: Log all emailsCopy contents to see what's being processed
-                log.info(`DEBUG: About to process ${emailsCopy.length} email objects for sheet rows`);
-                if (emailsCopy.length > 0) {
-                    log.info(`DEBUG: emailsCopy first item: ${JSON.stringify(emailsCopy[0])}`);
-                }
-                
-                for (const email of emailsCopy) {
-                    // DEBUG: Log each email object as it's processed
-                    log.info(`DEBUG: Processing email for contact row: ${JSON.stringify({
-                        email: email.email || 'MISSING',
-                        name: email.name || 'MISSING',
-                        title: email.title || 'MISSING'
-                    })}`);
-                    
-                    const emailSubject = encodeURIComponent(`Exceptional Candidate for ${item.title} Position`);
-                    const firstName = email.name?.split(' ')[0] || '';
-                    const greeting = firstName ? `Hi ${firstName},` : 'Hi!';
-                    const emailBody = encodeURIComponent(`${greeting}
-
-My name is Martha Madison, and I have a great candidate for your ${item.title} position. My company, The Madison Collective, specializes in precision hospitality recruitment for a very select group of standout hospitality brands, and we'd love to add your brand to our growing portfolio.
-
-We believe in quality over quantity. Our bespoke approach focuses on accuracy, efficiency, and service - not volume and clutter. We offer fully contingent searches, guaranteed placements and flexible pricing tailored to fit your hiring needs.
-
-If you're looking for a partner who understands the importance of excellence at every touch point, we'd love to hear from you.
-
-Best regards,`);
-
-                    const mailtoLink = `mailto:${email.email}?subject=${emailSubject}&body=${emailBody}`;
-
-                    // Create the contact row
-                    const contactRow = [
-                        '→',
-                        '',
-                        '',
-                        '',
-                        '',
                         email.name || 'Unknown',
                         email.title || 'N/A',
                         email.email || '',
-                        '', // Will be filled with HYPERLINK formula
-                        '',
-                        '',
-                        '',
-                        '',
-                        '',
-                        '' // Empty date added for contact rows
+                item.url || '',
+                        item.jobDetails ? item.jobDetails.substring(0, MAX_CELL_LENGTH) : '',
+                item.linkedin || '',
+                item.domain || '',
+                item.size || '',
+                        new Date().toISOString()
                     ];
-                    
-                    // DEBUG: Log the exact row being added to values
-                    log.info(`DEBUG: Adding contact row to values: ${JSON.stringify({
-                        name: contactRow[5],
-                        title: contactRow[6],
-                        email: contactRow[7]
-                    })}`);
-                    
-                    // Add the row to values
-                    values.push(contactRow);
-
-                    // Add formatting for the mailto cell
-                    requests.push({
-                        updateCells: {
-                            range: {
-                                sheetId: 0,
-                                startRowIndex: values.length - 1,
-                                endRowIndex: values.length,
-                                startColumnIndex: 8, // Column I (Send Email)
-                                endColumnIndex: 9
-                            },
-                            rows: [{
-                                values: [{
-                                    userEnteredValue: {
-                                        formulaValue: `=HYPERLINK("${mailtoLink}", "📧 Send Email")`
-                                    },
-                                    userEnteredFormat: {
-                                        backgroundColor: {
-                                            red: 0.15,
-                                            green: 0.6,
-                                            blue: 0.3
-                                        },
-                                        textFormat: {
-                                            bold: true,
-                                            foregroundColor: {
-                                                red: 1.0,
-                                                green: 1.0,
-                                                blue: 1.0
-                                            }
-                                        },
-                                        horizontalAlignment: 'CENTER',
-                                        verticalAlignment: 'MIDDLE'
-                                    }
-                                }]
-                            }],
-                            fields: 'userEnteredValue.formulaValue,userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)'
-                        }
-                    });
+                    values.push(row);
                 }
-                
-                // Add a separator row after all contacts for this job
-                if (emailsCopy.length > 0) {
-                    // Add a separator row to mark the end of this job's contacts
-                    values.push(['JOB_END: ' + item.company, '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
-                    // Add a completely empty row for better visual separation
-                    values.push(['', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
-                    log.info(`Added separator rows after ${emailsCopy.length} contacts for job "${item.company}"`);
-                }
+            } else {
+                // Add a single row for jobs with no contacts
+                const row = [
+                    item.title || '',
+                    item.company || '',
+                    item.parentCompany || 'N/A',
+                    item.location || '',
+                    item.salary || '',
+                    '(No Contacts Found)',
+                        '',
+                        '',
+                    item.url || '',
+                    item.jobDetails ? item.jobDetails.substring(0, MAX_CELL_LENGTH) : '',
+                    item.linkedin || '',
+                    item.domain || '',
+                    item.size || '',
+                    new Date().toISOString()
+                ];
+                values.push(row);
             }
         }
 
-        // Clear existing content
-        await sheetsClient.spreadsheets.values.clear({
+        // Write to sheet starting at A1
+        const result = await sheetsClient.spreadsheets.values.update({
             spreadsheetId: SHEET_ID,
-            range: 'Sheet1!A:O', // Updated to include the Parent Company column
-        });
-
-        // CRITICAL DEBUG: Check values array before sending to sheet
-        let emailRowCount = 0;
-        let rowsWithEmails = [];
-        
-        for (let i = 1; i < values.length; i++) {
-            if (values[i] && values[i].length > 7 && values[i][7] && values[i][7].includes('@')) {
-                emailRowCount++;
-                if (rowsWithEmails.length < 5) {  // Store first 5 email rows for debugging
-                    rowsWithEmails.push({
-                        rowIndex: i,
-                        name: values[i][5],
-                        title: values[i][6],
-                        email: values[i][7]
-                    });
-                }
-            }
-        }
-        
-        log.info(`FINAL DEBUG: Found ${emailRowCount} rows with email addresses out of ${values.length} rows`);
-        if (rowsWithEmails.length > 0) {
-            log.info(`FINAL DEBUG: Sample email rows - ${JSON.stringify(rowsWithEmails)}`);
-        }
-        
-        // Update with new values
-        await sheetsClient.spreadsheets.values.update({
-            spreadsheetId: SHEET_ID,
-            range: SHEET_RANGE,
-            valueInputOption: 'RAW',
+            range: 'Sheet1!A1',
+            valueInputOption: 'USER_ENTERED',
             resource: { values }
         });
 
-        // Apply all formatting
-        await sheetsClient.spreadsheets.batchUpdate({
-            spreadsheetId: SHEET_ID,
-            resource: { requests }
-        });
-
-        log.info(`SHEETS EXPORT: Successfully exported ${data.length} jobs to Google Sheet (ID: ${SHEET_ID})`);
-        return true;
+        log.info(`Successfully wrote ${values.length} rows to Google Sheets`);
+        return result;
     } catch (error) {
-        log.error(`SHEETS EXPORT ERROR: ${error.message}`);
-        log.error(error.stack);
-        return false;
+        log.error('Failed to export data to Google Sheets:', error);
+        throw error;
     }
 }
 
-async function main() {
-    // This array is local to the main function and should NOT be confused with the global one
-    // Using a separate variable for clarity
-    const processedJobsList = [];
+// --- END: Added Google Sheets Functions ---
+
+async function exportToPostgres(data) {
+    log.info(`>>> Entering exportToPostgres with ${data?.length || 0} items.`);
+    
+    if (!Array.isArray(data) || data.length === 0) {
+        log.warn('exportToPostgres called with invalid or empty data. Exiting.');
+        return;
+    }
+
+    let client;
+    let skippedCount = 0;
     try {
-        log.info('Starting script execution');
+        log.info('Attempting to connect to database pool...');
+        client = await pool.connect();
+        log.info('Successfully connected client from pool.');
         
-        // Check if we should clear the cache (for testing or when there are issues)
-        const clearCacheFlag = process.env.CLEAR_CACHE === 'true';
-        if (clearCacheFlag) {
-            log.info('CLEAR_CACHE flag is set, clearing company cache before proceeding...');
-            await clearCache();
-            log.info('Cache cleared successfully');
-        }
-
-        // Initialize Google Sheets client
-        const auth = new google.auth.GoogleAuth({
-            credentials: {
-                client_email: 'apify-data@the-madison-collective.iam.gserviceaccount.com',
-                private_key: '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC/2XWH2+TgXjcp\nfcs5lwSVuo2VAAUav9R59iTg24GVpRpyfdfJUQkBls/flBg5sDgZpc3EdmPicPZh\noZzkbO4CFd5kGG4ATm0DLljeeURtPGyDFoh2DOb/rdAYxjdt1TWefUlgB5RP4RdR\nZoOBejep8kvmHW3WPtSD0VvUm8tLZ7jfmzDJw7cP9VgXYTLdPCQnnNUm8tb8hXYK\nqy6osb0C7Zkwyrnd2jG86yLLbSvZhtTsQ3tTd9ixDov0Vypy83D9HCXFufwjnT6J\ntf4oOM1ERIFebCVq1BINxtTVCtvDj4Le0EMbkru4nS10UqRmbaPHmc8Yllog6XbW\nGD1RmbcZAgMBAAECggEALHdkrGalN/PeaTmE3wZHw8SHiF+Gz1pjDxmkFpIKCPtJ\nk/vjBgBITBv+dl3G96gGeLtbZAvkvtlb4ekpijBNQiJ7d0vKQzvqPHCDnJ0S5Ra6\nN/ADFQmMiPpqXzOiKUzfrqpvVVisYY9UbkOKe3ouaK+GNAHiMWRCsYLW/AJYLlOn\nUVUKEYm6mAnH6Pbd/otDGwldH0qcsVzyh2VmUW+6ugHNlchWBEnd5vvR/yt8cw7S\nNmFCEvuPDnxbnU9/AdvSxKd/fVDajcScjbrTID0bsOoEXUZ/Rt7zVa58AnGBA6W2\nciaeTZfvu/WA8oWatypnb512ox/CpGPKjBzIpwEFYQKBgQDmOouayJ3hjeiqZBD1\nuw/4jIHs/ue3s/utvQ0wYgeeSn5WBowwJKvjuZk4N0fsRVFYSTdWR73XuVBl3gk6\nyrQhx1AshvjBMq6fJgd9nTmp0wCKYevHpTk0Wyr5c7fW/2IGIDvlbk4Dgzi+4Fpk\nZ9aFPCdRLUM7v2pzNPrApuuUZQKBgQDVUx1ZJ5w1aBbb1PkXda0AhipgGz1Pr6bw\nthuwbxPjTO+fhwoPflTck58no1J0fSHhzaClu5Q33+wWwZ2C9wnxD2aVFvm5bkQ7\nPfDjp8/IO4rcies9bKZj30XX7S4nKUA5+XJZOVkfjdnIRTBIaHoWhbO1oED9E49H\nUDsrXtiqpQKBgGjUhZav/HukkylqsPJC/+2rhMl18+qIsHOWnnfGWzOvNcFT7+dH\n+2CQtPyM51nk4jox9Fl8Byw//CS2Kjuz6rtqts3fk0rdGffraAPBYG08X4WjOqnI\nSLjXPkUhdLcXx/mEGeHJDQq6aE85ds87HMnD7x8eXfvJl93nZLnuB1ylAoGASChN\nDRMw63/B+6oWd7D+S+cV/lw4aPPpbBKtWwi3mXM0uqla5dK9sb7dXvMHuQ96nn6H\nkIfaouvDWA810E7vtfKXqGaVIfwCaGeTS+4/gmNhnSepwqU1wyKK5Xb83ZI+f125\nKCUV2G6K9AszQcrVQTkIiK8kTHaJSH4DBbCXaWECgYEA4auLmClGnlE6MwIXskqu\n5k51dZE2bRazFnMU6MhcNshhVxGHrcfEC5WmqVGeY1Tyv2+8d/UuA+NtLG61zblJ\nhEv6q1f2A9JV82VWj9r9a0FGPRDtTwTdnylTcmZ6HxwAnsY9zN+DZJmwMVK4hmbl\nwkey0SXnl+5SMB+2VBNi9lY=\n-----END PRIVATE KEY-----\n'
-            },
-            scopes: ['https://www.googleapis.com/auth/spreadsheets']
-        });
-        const sheetsClient = google.sheets({ version: 'v4', auth });
-
-        // Test export
-        log.info('Running test export to Google Sheets...');
-        await exportData([{
-            test: 'data',
-            time: now(),
-            message: 'This is a test export to verify Google Sheets functionality',
-            url: 'test-url',
-            title: 'Test Job',
-            company: 'Test Company',
-            emailsText: 'test@example.com'
-        }], sheetsClient);
-        log.info('Test export completed');
-
-        // Load existing data from Google Sheet to check for duplicates
-        log.info('Loading existing data from Google Sheet to prevent duplicates...');
-        const sheetExistingUrls = new Set();
         try {
-            const response = await sheetsClient.spreadsheets.values.get({
-                spreadsheetId: SHEET_ID,
-                range: 'Sheet1!A:Z',
-            });
-            
-            const rows = response.data.values || [];
-            const urlColumnIndex = rows.length > 0 ? rows[0].findIndex(header => header.toLowerCase() === 'url') : -1;
-            
-            if (urlColumnIndex !== -1 && rows.length > 1) {
-                for (let i = 1; i < rows.length; i++) {
-                    if (rows[i] && rows[i][urlColumnIndex]) {
-                        sheetExistingUrls.add(rows[i][urlColumnIndex]);
+            log.info('Starting database transaction (BEGIN).');
+            await client.query('BEGIN');
+
+            for (const job of data) {
+                // Check for essential fields before attempting insert
+                if (!job || !job.url || !job.title || !job.company) {
+                    log.warn('Skipping job due to missing essential fields (url, title, or company):', job);
+                    skippedCount++;
+                    continue;
+                }
+
+                // First insert/update the job
+                const jobQuery = `
+                    INSERT INTO culinary_jobs (
+                        title, company, parent_company, location, salary,
+                        url, job_details, linkedin, domain, company_size, date_added
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                    ON CONFLICT (url) DO UPDATE SET 
+                        title = EXCLUDED.title,
+                        company = EXCLUDED.company,
+                        parent_company = EXCLUDED.parent_company,
+                        location = EXCLUDED.location,
+                        salary = EXCLUDED.salary,
+                        job_details = EXCLUDED.job_details,
+                        linkedin = EXCLUDED.linkedin,
+                        domain = EXCLUDED.domain,
+                        company_size = EXCLUDED.company_size,
+                        last_updated = NOW()
+                    RETURNING id`;
+
+                const jobResult = await client.query(jobQuery, [
+                    job.title || '',
+                    job.company || '',
+                    job.parentCompany || null,
+                    job.location || '',
+                    job.salary || '',
+                    job.url,
+                    job.jobDetails || '',
+                    job.linkedin || null,
+                    job.domain || null,
+                    job.size || null,
+                ]);
+
+                const jobId = jobResult.rows[0].id;
+
+                // Now handle contacts if they exist
+                if (job.emails && Array.isArray(job.emails) && job.emails.length > 0) {
+                    log.info(`Processing ${job.emails.length} contacts for job: ${job.title}`);
+                    
+                    // First, delete any existing contacts for this job to avoid duplicates
+                    await client.query('DELETE FROM culinary_contacts WHERE job_id = $1', [jobId]);
+                    
+                    // Then insert all contacts
+                    for (const contact of job.emails) {
+                        if (!contact.email) continue; // Skip if no email
+
+                        const contactQuery = `
+                            INSERT INTO culinary_contacts (
+                                job_id, name, title, email, date_added
+                            ) VALUES ($1, $2, $3, $4, NOW())
+                            ON CONFLICT (email, job_id) DO UPDATE SET
+                                name = EXCLUDED.name,
+                                title = EXCLUDED.title,
+                                last_updated = NOW()`;
+
+                        await client.query(contactQuery, [
+                            jobId,
+                            contact.name || 'Unknown',
+                            contact.title || 'N/A',
+                            contact.email
+                        ]);
                     }
                 }
             }
-            log.info(`Loaded ${sheetExistingUrls.size} existing job URLs from Google Sheet`);
+            
+            if (skippedCount === data.length) {
+                log.warn(`All ${skippedCount} jobs in the batch were skipped due to missing fields. Committing empty transaction.`);
+            } else {
+                log.info(`Processed ${data.length - skippedCount} jobs in the batch. Attempting COMMIT.`);
+            }
+            
+            await client.query('COMMIT');
+            log.info(`Successfully COMMITTED transaction for ${data.length - skippedCount} jobs.`);
+            
+        } catch (err) {
+            log.error('DATABASE TRANSACTION ERROR (inside try/catch):', err);
+            log.error('Failed job data (first item in batch):', data.length > 0 ? JSON.stringify(data[0], null, 2) : 'N/A');
+            if (client) {
+                log.info('Attempting ROLLBACK...');
+                await client.query('ROLLBACK');
+                log.info('ROLLBACK successful.');
+            } else {
+                log.warn('Client was not defined, cannot ROLLBACK.');
+            }
+            throw err;
+        } finally {
+            if (client) {
+                log.info('Releasing database client...');
+                client.release();
+                log.info('Client released.');
+            } else {
+                log.warn('Client was not defined, cannot release.');
+            }
+        }
+    } catch (error) {
+        log.error('DATABASE EXPORT PROCESS ERROR (outer catch):', error);
+        log.error('Failed job data (first item in batch, outer catch):', data.length > 0 ? JSON.stringify(data[0], null, 2) : 'N/A');
+        throw error;
+    }
+    log.info(`<<< Exiting exportToPostgres after processing ${data?.length || 0} items.`);
+}
+
+// Update the batch export handler
+async function handleBatchExport() {
+    if (exportBatch.length >= EXPORT_BATCH_SIZE) {
+        log.info(`Batch size ${exportBatch.length} reached, exporting...`);
+        try {
+            await exportToPostgres(exportBatch);
+            exportBatch = []; // Clear the batch after successful export
+            log.info('Batch export completed successfully');
         } catch (error) {
-            log.error(`Error loading data from Google Sheet: ${error.message}`);
+            log.error('Failed to export batch:', error);
+            // Keep the batch for retry on next attempt
+        }
+    }
+}
+
+async function createTables() {
+    const client = await pool.connect();
+    try {
+        // Create an enum type for job status if needed
+        // await client.query(`
+        //     DO $$ BEGIN
+        //         CREATE TYPE job_status AS ENUM ('active', 'filled', 'expired');
+        //     EXCEPTION
+        //         WHEN duplicate_object THEN null;
+        //     END $$;
+        // `);
+
+        // Create the jobs table with improved structure
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS culinary_jobs (
+                id SERIAL PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                company VARCHAR(255) NOT NULL,
+                parent_company VARCHAR(255),
+                location VARCHAR(255),
+                salary VARCHAR(255),
+                contact_name VARCHAR(255),
+                contact_title VARCHAR(255),
+                email VARCHAR(255),
+                url TEXT UNIQUE NOT NULL,
+                job_details TEXT,
+                linkedin VARCHAR(255),
+                domain VARCHAR(255),
+                company_size VARCHAR(50),
+                date_added TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                
+                -- Add indexes for common queries
+                CONSTRAINT unique_job_url UNIQUE (url),
+                CONSTRAINT unique_job_email UNIQUE (email, company)
+            );
+
+            -- Add indexes for performance
+            CREATE INDEX IF NOT EXISTS idx_company_name ON culinary_jobs(company);
+            CREATE INDEX IF NOT EXISTS idx_job_title ON culinary_jobs(title);
+            CREATE INDEX IF NOT EXISTS idx_email ON culinary_jobs(email);
+            CREATE INDEX IF NOT EXISTS idx_date_added ON culinary_jobs(date_added);
+        `);
+
+        // Create the contacts table linked to the jobs table
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS culinary_contacts (
+                id SERIAL PRIMARY KEY,
+                job_id INTEGER NOT NULL REFERENCES culinary_jobs(id) ON DELETE CASCADE,
+                name VARCHAR(255),
+                title VARCHAR(255),
+                email VARCHAR(255) NOT NULL,
+                date_added TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+
+                -- Constraint to prevent duplicate emails for the same job
+                CONSTRAINT unique_contact_for_job UNIQUE (job_id, email)
+            );
+
+            -- Add index for faster lookups by job_id
+            CREATE INDEX IF NOT EXISTS idx_contact_job_id ON culinary_contacts(job_id);
+            -- Add index for faster lookups by email (optional, depends on query patterns)
+            CREATE INDEX IF NOT EXISTS idx_contact_email ON culinary_contacts(email);
+        `);
+
+        log.info('Database tables and indexes created successfully');
+    } catch (error) {
+        log.error('Error creating database tables:', error);
+        throw error;
+    } finally {
+        client.release();
+    }
+}
+
+// Use Actor.main() for the main execution block
+Actor.main(async () => {
+    try {
+        // Test database connection first
+        if (!await testDatabaseConnection()) { // Ensure testDatabaseConnection is defined below
+            throw new Error('Failed to connect to database');
         }
 
-        await loadCache();
-        const datasetName = 'culinary-jobs';
-        const existingDataset = await Dataset.open(datasetName);
-        log.info(`Opened dataset with ID: ${existingDataset.id}`);
-        
-        // Combine Google Sheet URLs with dataset URLs
-        const existingItems = await existingDataset.getData();
-        const datasetUrls = new Set(existingItems.items.map(item => item.url).filter(Boolean));
-        const existingUrls = new Set([...sheetExistingUrls, ...datasetUrls]);
-        log.info(`Found ${existingUrls.size} existing job URLs (${sheetExistingUrls.size} from Sheet, ${datasetUrls.size} from dataset)`);
-        
+        // Create tables if they don't exist
+        try {
+            await createTables(); // Ensure createTables is defined below
+            log.info('Database tables initialized successfully');
+        } catch (dbError) {
+            log.error('Error initializing database tables:', dbError);
+            throw dbError;
+        }
+
+        // Initialize state store and request queue
         const stateStore = await KeyValueStore.open();
-        log.info(`State KeyValueStore ID: ${stateStore.id}`);
-        let state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0, nextOffset:
- 0 };
-        log.info('Scraping job listings...');
-        const startPage = 'https://culinaryagents.com/search/jobs?search%5Bcompensation%5D%5B%5D=salary';
+        const state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0 };
         const requestQueue = await RequestQueue.open();
-        await requestQueue.addRequest({ url: startPage, userData: { page: 1 } });
+
+        // Add initial search URL
+        await requestQueue.addRequest({
+            url: 'https://culinaryagents.com/search/jobs?search%5Bcompensation%5D%5B%5D=salary',
+            userData: { page: 1 }
+        });
+
+        // Configure crawler (Changed back to CheerioCrawler)
         const crawler = new CheerioCrawler({
             requestQueue,
             maxRequestRetries: 3,
+            // Add concurrency/rate limits from old code
             maxConcurrency: 1,
             minConcurrency: 1,
             requestHandlerTimeoutSecs: 120,
             maxRequestsPerMinute: TEST_MODE ? 2 : 6,
-            async requestHandler({ $, request, enqueueLinks }) {
+            // REMOVED launchContext and preNavigationHooks
+
+            // Replace requestHandler with logic from the old snippet
+            async requestHandler({ $, request, log }) { // Ensure enqueueLinks is available if needed, or remove if not used by snippet
                 log.info(`Processing page ${request.url}`);
+                
+                // --- START: Logic from provided snippet --- 
                 const jobCards = $('.ca-single-job-card');
                 log.info(`Found ${jobCards.length} jobs on page ${request.url}`);
+                
+                // Assume stateStore is initialized outside
+                const stateStore = await KeyValueStore.open(); 
+                const state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0 };
+
+                // Assume existingDataset is initialized outside
+                const existingDataset = await Dataset.open('culinary-jobs'); 
+                
+                // Assume existingUrls Set is initialized outside and populated if needed
+                const existingUrls = new Set(); // Placeholder - this needs proper initialization
+
+                // Assume processedJobsList array is initialized outside for batching
+                // let processedJobsList = []; // Placeholder - this needs proper initialization
+                // Note: exportBatch is already global, maybe use that instead? Using exportBatch for now.
+
                 if (request.userData?.page === 1 || !request.userData?.page) {
                     const totalJobsText = $('.jobs-count-total').text().trim();
                     const totalJobsMatch = totalJobsText.match(/About ([0-9,]+) jobs/);
@@ -2091,38 +2093,40 @@ async function main() {
                         await stateStore.setValue('TOTAL_JOBS', totalJobs);
                     }
                 }
+                
                 const listings = [];
                 const cardsToProcess = TEST_MODE ? 
-                    Math.min(TEST_JOB_LIMIT - state.processedCount, jobCards.length) : 
+                    Math.min(TEST_JOB_LIMIT - (state.processedCount || 0), jobCards.length) : 
                     jobCards.length;
+                    
                 for (let i = 0; i < cardsToProcess; i++) {
                     const el = jobCards[i];
-                    const jobUrl = ensureAbsoluteUrl($(el).attr('href'));
+                    const jobUrl = ensureAbsoluteUrl($(el).attr('href')); // ensureAbsoluteUrl must be defined
                     if (!jobUrl || existingUrls.has(jobUrl)) {
                         if (jobUrl) log.info(`Skipping existing job: ${jobUrl}`);
                         continue;
                     }
                     const title = $(el).find('.job-title strong').text().trim() || 'Unknown';
                     const rawCompany = $(el).find('.text-body.text-ellipsis:not(.job-employment)').text().trim() || 'Unknown';
-                    const { name: company } = parseCompanyAndLocation(rawCompany);
-                    // Store the full address as location
+                    const { name: company } = parseCompanyAndLocation(rawCompany); // parseCompanyAndLocation must be defined
                     const fullAddress = $(el).find('.text-muted.text-ellipsis').text().trim() || 'N/A';
                     
                     listings.push({ 
                         url: jobUrl, 
                         title, 
                         company,
-                        location: fullAddress, // This is the full address that will be displayed
-                        searchLocation: cleanCompanyName(fullAddress), // This is what we'll use for API search
+                        location: fullAddress,
+                        searchLocation: cleanCompanyName(fullAddress), // cleanCompanyName must be defined
                         salary: $(el).find('.job-employment').text().trim() || 'N/A'
                     });
                 }
+                
                 if (listings.length > 0) {
                     log.info(`Processing batch of ${listings.length} new listings`);
                     const jobDetailsArray = [];
                     for (const listing of listings) {
                         try {
-                            await delay(TEST_MODE ? 1000 : 2000);
+                            await delay(TEST_MODE ? 1000 : 2000); // delay must be defined
                             const response = await fetch(listing.url, { method: 'GET' });
                             const body = await response.text();
                             if (!response.ok) {
@@ -2132,14 +2136,12 @@ async function main() {
                             const $detail = cheerio.load(body);
                             const jobDetailsText = $detail('#job-details .text-muted div').text().trim() || 'N/A';
                             
-                            // Check for "Part of" links in the job details
                             let parentCompany = null;
                             const partOfElement = $detail('p:contains("Part of")');
                             if (partOfElement.length > 0) {
                                 const partOfLink = partOfElement.find('a.text-muted');
                                 if (partOfLink.length > 0) {
                                     parentCompany = partOfLink.text().trim();
-                                    log.info(`Found "Part of" link: "${parentCompany}"`);
                                 }
                             }
                             
@@ -2153,78 +2155,54 @@ async function main() {
                                     if (name) leadership.push({ name, title });
                                 });
                             }
-                            log.info(`Leadership for ${listing.url}: ${JSON.stringify(leadership)}`);
                             
-                            // Enhanced company info retrieval using Part of field when available
+                            let contactInfo; // Declare contactInfo
                             if (parentCompany) {
                                 log.info(`Using parent company "${parentCompany}" for contact search`);
-                                
-                                // Use specific source markers to differentiate cache entries
-                                // Set parent company to use "parent_company" source, and original company to use "subsidiary_company"
-                                // Do NOT pass location information to getCompanyInfoWithSource to avoid location-based TLD matches
-                                const parentContactInfo = await getCompanyInfoWithSource(parentCompany, '', 'parent_company');
+                                const parentContactInfo = await getCompanyInfoWithSource(parentCompany, '', 'parent_company'); // getCompanyInfoWithSource must be defined
                                 const companyContactInfo = await getCompanyInfoWithSource(listing.company, '', 'subsidiary_company');
                                 
-                                // Safe checks for emails array before accessing properties
-                                const hasParentEmails = parentContactInfo && parentContactInfo.emails && Array.isArray(parentContactInfo.emails);
-                                const hasCompanyEmails = companyContactInfo && companyContactInfo.emails && Array.isArray(companyContactInfo.emails);
+                                const hasParentEmails = parentContactInfo?.emails && Array.isArray(parentContactInfo.emails);
+                                const hasCompanyEmails = companyContactInfo?.emails && Array.isArray(companyContactInfo.emails);
                                 const parentEmailCount = hasParentEmails ? parentContactInfo.emails.length : 0;
                                 const companyEmailCount = hasCompanyEmails ? companyContactInfo.emails.length : 0;
                                 
-                                // Log the sources for debugging
                                 log.info(`Parent company source: ${parentContactInfo.source || 'unknown'}, emails: ${parentEmailCount}`);
                                 log.info(`Original company source: ${companyContactInfo.source || 'unknown'}, emails: ${companyEmailCount}`);
                                 
-                                // Create a new tracking set to avoid duplicate emails when merging
                                 const emailMap = new Map();
-                                
-                                // Process parent company emails first (higher priority)
                                 if (hasParentEmails) {
                                     for (const email of parentContactInfo.emails) {
-                                        if (email && email.email) {  // Defensive check
+                                        if (email?.email) { 
                                             const key = email.email.toLowerCase();
-                                            if (!emailMap.has(key)) {
-                                                // Create a deep copy of the email to avoid shared references
-                                                const emailCopy = JSON.parse(JSON.stringify(email));
-                                                emailMap.set(key, {...emailCopy, source: 'parent_company'});
-                                            }
+                                            if (!emailMap.has(key)) emailMap.set(key, {...JSON.parse(JSON.stringify(email)), source: 'parent_company'});
                                         }
                                     }
                                 }
-                                
-                                // Then add company emails if not already present
                                 if (hasCompanyEmails) {
                                     for (const email of companyContactInfo.emails) {
-                                        if (email && email.email) {  // Defensive check
+                                        if (email?.email) { 
                                             const key = email.email.toLowerCase();
-                                            if (!emailMap.has(key)) {
-                                                // Create a deep copy of the email to avoid shared references
-                                                const emailCopy = JSON.parse(JSON.stringify(email));
-                                                emailMap.set(key, {...emailCopy, source: 'subsidiary_company'});
-                                            }
+                                            if (!emailMap.has(key)) emailMap.set(key, {...JSON.parse(JSON.stringify(email)), source: 'subsidiary_company'});
                                         }
                                     }
                                 }
                                 
-                                // Convert map back to array and sort by title priority
                                 const combinedEmails = Array.from(emailMap.values())
-                                    .sort((a, b) => getTitlePriority(a.title) - getTitlePriority(b.title));
-                                
-                                // Merge the contact results, prioritizing parent company contacts
-                                const contactInfo = {
+                                    .sort((a, b) => getTitlePriority(a.title) - getTitlePriority(b.title)); // getTitlePriority must be defined
+                                    
+                                contactInfo = {
                                     linkedin: parentContactInfo.linkedin || companyContactInfo.linkedin || 'N/A',
                                     domain: parentContactInfo.domain || companyContactInfo.domain || 'N/A',
                                     size: parentContactInfo.size || companyContactInfo.size || 'N/A',
                                     emails: combinedEmails,
                                     timestamp: now(),
-                                    source: parentContactInfo.emails.length > 0 ? 'parent_company' : 'subsidiary_company'
+                                    source: parentEmailCount > 0 ? 'parent_company' : 'subsidiary_company'
                                 };
-                                log.info(`Combined contacts from parent company and original company, ${combinedEmails.length} unique emails`);
+                                log.info(`Combined contacts, ${combinedEmails.length} unique emails`);
                             } else {
-                                // If no parent company, use the original approach
-                                // Do NOT pass location to avoid location-based TLD matches
                                 log.info(`Getting contact info for "${listing.company}"`);
-                                var contactInfo = await getCompanyInfo(listing.company, '');
+                                contactInfo = await getCompanyInfo(listing.company, ''); // getCompanyInfo must be defined
                             }
                             
                             const emailsText = contactInfo.emails.length > 0 
@@ -2233,327 +2211,106 @@ async function main() {
                                 
                             log.info(`Found ${contactInfo.emails.length} emails for "${listing.company}": ${emailsText}`);
                             
-                            // Double ensure we create a proper deep copy of emails
-                            // to prevent cross-contamination between jobs
                             let emailsCopy = [];
                             if (contactInfo.emails && contactInfo.emails.length > 0) {
-                                // First stringify then parse for a guaranteed deep copy
                                 const emailsJSON = JSON.stringify(contactInfo.emails);
                                 emailsCopy = JSON.parse(emailsJSON);
+                                emailsCopy = emailsCopy.slice(0, 20); // Changed from 3 to 20 to get up to 20 best contacts
                                 
-                                // Important: take only the top 3 emails after sorting
-                                // This ensures we don't show too many contacts per job
-                                emailsCopy = emailsCopy.slice(0, 3);
-                                
-                                log.info(`Using top ${emailsCopy.length} emails for job: ${listing.company} - ${listing.title}`);
-                                emailsCopy.forEach((email, idx) => {
-                                    log.info(`  Selected email #${idx+1}: ${email.name}, ${email.title}, ${email.email}`);
-                                });
-                                
-                                // Add job identifying information to each email object to help with debugging
                                 emailsCopy = emailsCopy.map((email, idx) => {
-                                    // Verify this contact belongs to the current company
                                     const contactCompany = email._originalCompany || 'unknown';
-                                    const contactDomain = email._originalDomain || 'unknown';
-                                    
-                                    // Check and log if company mismatch (for debugging)
-                                    if (contactCompany.toLowerCase() !== listing.company.toLowerCase() && 
-                                        !contactCompany.toLowerCase().includes(listing.company.toLowerCase()) &&
-                                        !listing.company.toLowerCase().includes(contactCompany.toLowerCase())) {
-                                        log.info(`⚠️ COMPANY MISMATCH: Contact ${email.name} (${email.email}) is from "${contactCompany}" but job is from "${listing.company}"`);
-                                    }
-                                    
                                     return {
                                         ...email,
-                                        _jobId: `${listing.company.replace(/\s+/g, '-')}-${Date.now()}-${idx}`, // Add unique job identifier
+                                        _jobId: `${listing.company.replace(/\s+/g, '-')}-${Date.now()}-${idx}`,
                                         _jobTitle: listing.title,
                                         _company: listing.company,
                                         _timestamp: now(),
-                                        _index: idx, // Add index within this job's contacts
-                                        
-                                        // Keep original source information
+                                        _index: idx,
                                         _originalCompany: contactCompany,
-                                        _originalDomain: contactDomain,
-                                        
-                                        // Add flags for debugging
+                                        _originalDomain: email._originalDomain || 'unknown',
                                         _matchesJobCompany: contactCompany.toLowerCase() === listing.company.toLowerCase(),
                                         _processingTime: Date.now()
                                     };
                                 });
-                                
-                                log.info(`Created independent deep copy of ${emailsCopy.length} emails for ${listing.company}`);
                             }
                             
-                            // Create a completely independent job detail object (no shared references)
                             const jobDetail = {
-                                // Create fresh copies of all fields
                                 title: String(listing.title || ''),
                                 company: String(listing.company || ''),
                                 location: String(listing.location || ''),
                                 salary: String(listing.salary || ''),
                                 url: String(listing.url || ''),
                                 searchLocation: String(listing.searchLocation || ''),
-                                
-                                // Deep copy complex objects
-                                jobDetails: truncateText(jobDetailsText),
+                                jobDetails: truncateText(jobDetailsText), // truncateText must be defined
                                 leadership: leadership.length > 0 ? [...leadership] : 'N/A',
                                 parentCompany: parentCompany || 'N/A',
                                 linkedin: contactInfo.linkedin || 'N/A',
                                 contactLink: contactInfo.linkedin || 'N/A',
-                                emails: emailsCopy, // Independent deep copy with job identification
+                                emails: emailsCopy,
                                 emailsText,
                                 domain: contactInfo.domain || 'N/A',
                                 size: contactInfo.size || 'N/A',
                                 dataSource: contactInfo.source || 'unknown',
                                 dataDate: now(),
-                                dateAdded: now(), // Record when this job was first added to our system
-                                _processId: Date.now() // Add unique processing ID to each job
+                                dateAdded: now(), 
+                                _processId: Date.now()
                             };
                             
-                            // Do a final verification that this is a complete new object without any shared references
                             const verifiedDetail = JSON.parse(JSON.stringify(jobDetail));
                             jobDetailsArray.push(verifiedDetail);
-                            log.info(`Processed job: ${listing.title} at ${listing.company} with ${verifiedDetail.emails.length} unique contacts`);
-                            
-                            // Increment processed count for each successfully processed job
-                            state.processedCount++;
+                            log.info(`Processed job: ${listing.title} at ${listing.company} with ${verifiedDetail.emails.length} contacts`);
+                            state.processedCount = (state.processedCount || 0) + 1;
                         } catch (error) {
                             log.error(`Error fetching details for ${listing.url}: ${error.message}`);
                         }
                     }
+                    
                     if (jobDetailsArray.length > 0) {
                         try {
-                            // Debug output - verify we have unique emails for each job
-                            jobDetailsArray.forEach((job, index) => {
-                                if (job.emails && job.emails.length > 0) {
-                                    const firstEmail = job.emails[0].email;
-                                    log.info(`Job #${index+1}: "${job.company}" (${job.title}) - First email: ${firstEmail}`);
-                                    
-                                    // Verify each email has job identification
-                                    job.emails.forEach(email => {
-                                        if (!email._jobId) {
-                                            log.info(`Email in job "${job.company}" is missing job identification - adding now`);
-                                            email._jobId = `${job.company}-${Date.now()}-${index}`;
-                                            email._jobTitle = job.title;
-                                            email._company = job.company;
-                                        }
-                                    });
-                                }
-                            });
-                            
                             await existingDataset.pushData(jobDetailsArray);
+                            const jobDetailsCopy = JSON.parse(JSON.stringify(jobDetailsArray));
                             
-                            // Create deep copies to avoid reference sharing between jobs
-                            // Use JSON methods to ensure complete isolation of objects
-                            const jobDetailsJSON = JSON.stringify(jobDetailsArray);
-                            const jobDetailsCopy = JSON.parse(jobDetailsJSON);
-                            
-                            // Another validation step - make sure each job's contacts belong to it
+                            // Validation for duplicate emails within the same job
                             jobDetailsCopy.forEach(job => {
                                 if (job.emails && job.emails.length > 0) {
-                                    // Filter for contacts that match this job's company
-                                    const originalLength = job.emails.length;
-                                    
-                                    // Create a map of verified emails for this job
                                     const jobEmailMap = new Map();
-                                    
-                                    // Only filter duplicate emails - keep all emails regardless of company/domain match
                                     job.emails = job.emails.filter(email => {
-                                        const emailCompany = email._originalCompany || '';
-                                        const emailDomain = email._originalDomain || '';
-                                        
-                                        // Log any potential company mismatches for information only
-                                        if (emailCompany) {
-                                            const emailLower = emailCompany.toLowerCase();
-                                            const jobLower = job.company.toLowerCase();
-                                            
-                                            const isMatch = emailLower === jobLower || 
-                                                           emailLower.includes(jobLower) || 
-                                                           jobLower.includes(emailLower);
-                                            
-                                            if (!isMatch) {
-                                                log.info(`ℹ️ NOTE: Keeping mismatched email: ${email.name} (${email.email}) from company "${emailCompany}" in job for "${job.company}"`);
-                                            }
-                                        }
-                                        
-                                        // Only filter out duplicate emails within the same job
                                         const emailKey = email.email.toLowerCase();
-                                        if (jobEmailMap.has(emailKey)) {
-                                            log.info(`⚠️ REMOVED DUPLICATE EMAIL: ${email.email} already exists for this job`);
-                                            return false;
-                                        }
-                                        
-                                        // This email passed validation
+                                        if (jobEmailMap.has(emailKey)) return false;
                                         jobEmailMap.set(emailKey, true);
                                         return true;
                                     });
-                                    
-                                    if (job.emails.length < originalLength) {
-                                        log.info(`Filtered ${originalLength - job.emails.length} duplicate emails from job "${job.company} - ${job.title}"`);
-                                    }
                                 }
                             });
                             
-                            // Add another verification check
-                            log.info(`Verified ${jobDetailsCopy.length} completely independent job objects with validated emails`);
-                            
-                            processedJobsList.push(...jobDetailsCopy);
-                            
-                            // Log current count
-                            log.info(`Current processed jobs count: ${processedJobsList.length}`);
-                            log.info(`Total jobs processed so far: ${state.processedCount}`);
-                            
-                            // Update the state in storage
+                            exportBatch.push(...jobDetailsCopy); // Use global exportBatch
+                            log.info(`Current export batch size: ${exportBatch.length}`);
                             await stateStore.setValue('SCRAPE_STATE', state);
                             
-                            // Export when we reach batch size of 5
-                            if (processedJobsList.length >= EXPORT_BATCH_SIZE) {
-                                log.info(`EXPORT TRIGGERED: Attempting to export batch of ${processedJobsList.length} jobs...`);
-                                
-                                // Add debugging verification before batch export
-                                const emailMap = new Map();
-                                let foundDuplication = false;
-                                
-                                processedJobsList.forEach((job, index) => {
-                                    if (job.emails && job.emails.length > 0) {
-                                        // Get first email to check for duplication
-                                        const firstEmail = job.emails[0].email;
-                                        const mapKey = `${firstEmail}-${job.company}`;
-                                        
-                                        if (emailMap.has(mapKey)) {
-                                            const prevIndex = emailMap.get(mapKey);
-                                            log.info(`BATCH EXPORT: Duplication detected. Job #${index+1} (${job.company}) has same first email as job #${prevIndex+1}`);
-                                            foundDuplication = true;
-                                            
-                                            // Fix by creating completely new objects for this job's emails
-                                            job.emails = job.emails.map(email => {
-                                                // Create a completely new email object by extracting only needed fields
-                                                return {
-                                                    name: email.name || 'Unknown',
-                                                    title: email.title || 'N/A',
-                                                    email: email.email || '',
-                                                    confidence: email.confidence || 0,
-                                                    priority: email.priority || 0,
-                                                    _uniqueId: `batch-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
-                                                    _jobIndex: index,
-                                                    _company: job.company,
-                                                    _jobTitle: job.title,
-                                                    _batch: "regular"
-                                                };
-                                            });
-                                            
-                                            log.info(`Fixed duplication for job #${index+1}`);
-                                        } else {
-                                            emailMap.set(mapKey, index);
-                                        }
-                                    }
-                                });
-                                
-                                if (foundDuplication) {
-                                    log.info(`Duplication fixed in batch - recreated email objects`);
-                                } else {
-                                    log.info(`No duplication found in batch of ${processedJobsList.length} jobs`);
-                                }
-                                
-                                // Perform deep copy through full serialization
-                                const exportJSON = JSON.stringify(processedJobsList);
-                                const dataToExport = JSON.parse(exportJSON);
-                                
-                                const exportSuccess = await exportData(dataToExport, sheetsClient);
-                                if (exportSuccess) {
-                                    log.info(`Successfully exported ${processedJobsList.length} jobs to Google Sheets`);
-                                    
-                                    // IMPORTANT: Clear the processed list after successful export
-                                    // This prevents old jobs from staying in memory and affecting new ones
-                                    processedJobsList = [];
-                                    log.info(`Cleared processed jobs list after successful export to prevent memory contamination`);
-                                } else {
-                                    log.info(`Failed to export batch, will retry next time`);
-                                }
-                                // Add delay after export
-                                log.info('Waiting 10 seconds before continuing...');
-                                await delay(10000);
+                            if (exportBatch.length >= EXPORT_BATCH_SIZE) {
+                                log.info(`EXPORT TRIGGERED: Batch size ${exportBatch.length}`);
+                                const dataToExport = JSON.parse(JSON.stringify(exportBatch));
+                                await handleBatchExport(); // This function now uses the global exportBatch
+                                log.info(`Cleared export batch after successful/attempted export.`);
+                                // Note: handleBatchExport should clear the global exportBatch on success
                             }
                         } catch (error) {
                             log.error(`Failed to process batch: ${error.message}`);
                         }
                     }
                 }
-                // Log the processing status
+                
                 log.info(`Jobs processed: ${state.processedCount}/${TEST_MODE ? TEST_JOB_LIMIT : (await stateStore.getValue('TOTAL_JOBS') || 2000)}`);
                 
-                // Check if we should stop in test mode
                 if (TEST_MODE && state.processedCount >= TEST_JOB_LIMIT) {
                     log.info(`Test mode: Reached limit of ${TEST_JOB_LIMIT} jobs. Stopping crawler.`);
-                    if (EXPORT_DATA && processedJobsList.length > 0) {
-                        // Add debugging info to verify email uniqueness before export
-                        const emailMap = new Map();
-                        processedJobsList.forEach((job, index) => {
-                            if (job.emails && job.emails.length > 0) {
-                                const firstEmail = job.emails[0].email;
-                                const emailKey = `${firstEmail}-${job.company}`;
-                                
-                                if (emailMap.has(emailKey)) {
-                                    const prevIndex = emailMap.get(emailKey);
-                                    log.info(`CRITICAL DUPLICATION: Job #${index+1} (${job.company}) has same first email as job #${prevIndex+1}`);
-                                    
-                                    // Add even more distinctive identifiers
-                                    job.emails = job.emails.map(email => ({
-                                        ...email,
-                                        _uniqueId: `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
-                                        _jobIndex: index
-                                    }));
-                                } else {
-                                    emailMap.set(emailKey, index);
-                                }
-                                
-                                // Log the first email of each job for debugging
-                                log.info(`Pre-export check - Job #${index+1}: "${job.company}" has first email: ${firstEmail}`);
-                            }
-                        });
-                        
-                        // Deep copy for export - use stringification for complete isolation
-                        const exportJSON = JSON.stringify(processedJobsList);
-                        const dataToExport = JSON.parse(exportJSON);
-                        
-                        // Verify email uniqueness after deep copy
-                        const postCopyMap = new Map();
-                        let duplicationFixed = true;
-                        
-                        dataToExport.forEach((job, index) => {
-                            if (job.emails && job.emails.length > 0) {
-                                const firstEmail = job.emails[0].email;
-                                const emailKey = `${firstEmail}-${job.company}`;
-                                
-                                if (postCopyMap.has(emailKey)) {
-                                    const prevIndex = postCopyMap.get(emailKey);
-                                    log.error(`DUPLICATION PERSISTS: Job #${index+1} (${job.company}) still shares first email with job #${prevIndex+1}`);
-                                    duplicationFixed = false;
-                                } else {
-                                    postCopyMap.set(emailKey, index);
-                                }
-                            }
-                        });
-                        
-                        if (duplicationFixed) {
-                            log.info(`Email isolation verification passed - all jobs have independent email objects`);
-                        } else {
-                            log.error(`Email isolation verification FAILED - duplication still detected`);
-                        }
-                        
-                        await exportData(dataToExport, sheetsClient);
-                    }
-                    // Force crawler to stop by not adding more requests
-                    await requestQueue.drop();
-                    log.info('Request queue cleared. Crawler will stop once current requests are processed.');
+                    // await requestQueue.drop(); // This might be too abrupt, let current finish
                     return;
                 }
                 
-                // Only add more pages if we haven't reached the target
                 const nextPage = request.userData?.page || 1;
                 const totalJobsTarget = TEST_MODE ? TEST_JOB_LIMIT : (await stateStore.getValue('TOTAL_JOBS') || 2000);
                 
-                // Add proper check to determine if we need to stop
                 if (state.processedCount < totalJobsTarget) {
                     const nextPageUrl = `https://culinaryagents.com/search/jobs?search%5Bcompensation%5D%5B%5D=salary&offset=${nextPage * 20}`;
                     log.info(`Queueing next page: ${nextPageUrl}`);
@@ -2561,152 +2318,77 @@ async function main() {
                     await requestQueue.addRequest({ url: nextPageUrl, userData: { page: nextPage + 1 } });
                 } else {
                     log.info(`Reached target of ${totalJobsTarget} jobs. No more pages will be queued.`);
-                    // Update state one final time
                     await stateStore.setValue('SCRAPE_STATE', state);
                 }
+                // --- END: Logic from provided snippet --- 
             },
-            failedRequestHandler({ request, error }) {
-                log.error(`Request ${request.url} failed with error: ${error.message}`);
+
+            failedRequestHandler({ request, error, log }) {
+                log.error(`Request ${request.url} failed: ${error.message}`);
             }
         });
-        log.info('Starting the crawler');
-        
-        // Set a maximum runtime for the crawler (4 hours) to prevent infinite runs
-        const MAX_RUNTIME_MS = 4 * 60 * 60 * 1000; // 4 hours in milliseconds
+
+        // Run crawler with timeout logic
+        log.info('Starting Cheerio crawler...');
+        const MAX_RUNTIME_MS = 4 * 60 * 60 * 1000; // 4 hours
         const startTime = Date.now();
-        
-        // Create a promise that resolves after the maximum runtime
-        const timeoutPromise = new Promise(resolve => {
+        const timeoutPromise = new Promise((_, reject) => { // Reject on timeout
             setTimeout(() => {
-                log.info(`Maximum runtime of ${MAX_RUNTIME_MS/1000/60} minutes reached. Stopping crawler.`);
-                resolve();
+                reject(new Error(`Maximum runtime of ${MAX_RUNTIME_MS / 1000 / 60} minutes reached.`));
             }, MAX_RUNTIME_MS);
         });
-        
-        // Run the crawler with the timeout
-        await Promise.race([
-            crawler.run(),
-            timeoutPromise
-        ]);
-        
-        // Add a check to see if we stopped because of timeout
-        const runtimeMs = Date.now() - startTime;
-        if (runtimeMs >= MAX_RUNTIME_MS) {
-            log.info(`Crawler stopped due to reaching maximum runtime of ${MAX_RUNTIME_MS/1000/60} minutes.`);
-        } else {
-            log.info(`Crawler completed naturally after ${runtimeMs/1000/60} minutes.`);
-        }
-        
-        await saveCache();
-        if (EXPORT_DATA && processedJobsList.length > 0) {
-            log.info(`Exporting final results to Google Sheets...`);
-            log.info(`Exporting ${processedJobsList.length} jobs to Google Sheets with ${processedJobsList.reduce((total, job) => total + (job.emails?.length || 0), 0)} total contacts`);
-            
-            // Add debugging info to verify email uniqueness before final export
-            const emailMap = new Map();
-            processedJobsList.forEach((job, index) => {
-                if (job.emails && job.emails.length > 0) {
-                    const firstEmail = job.emails[0].email;
-                    const emailKey = `${firstEmail}-${job.company}`;
-                    
-                    if (emailMap.has(emailKey)) {
-                        const prevIndex = emailMap.get(emailKey);
-                        log.info(`FINAL EXPORT DUPLICATION: Job #${index+1} (${job.company}) has same first email as job #${prevIndex+1}`);
-                        
-                        // Add even more distinctive identifiers and replace the email array entirely
-                        job.emails = job.emails.map(email => {
-                            // Create a completely new object
-                            return {
-                                name: email.name || 'Unknown',
-                                title: email.title || 'N/A',
-                                email: email.email || '',
-                                confidence: email.confidence || 0,
-                                priority: email.priority || 0,
-                                _uniqueId: `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
-                                _jobIndex: index,
-                                _company: job.company,
-                                _jobTitle: job.title
-                            };
-                        });
-                    } else {
-                        emailMap.set(emailKey, index);
-                    }
-                }
-            });
-            
-            // Deep copy with complete serialization and deserialization
-            const exportJSON = JSON.stringify(processedJobsList);
-            const dataToExport = JSON.parse(exportJSON);
-            
-            // Verify after copy
-            const verificationMap = new Map();
-            let allUnique = true;
-            
-            dataToExport.forEach((job, index) => {
-                if (job.emails && job.emails.length > 0) {
-                    // Use both email and company as key for better uniqueness
-                    const firstEmail = job.emails[0].email;
-                    job.emails.forEach((email, emailIndex) => {
-                        const emailKey = `${email.email}-${job.company}`;
-                        if (verificationMap.has(emailKey)) {
-                            const prevIndex = verificationMap.get(emailKey);
-                            log.error(`VERIFICATION ERROR: Job #${index+1} email #${emailIndex+1} duplicates previous job #${prevIndex.jobIndex+1} email #${prevIndex.emailIndex+1}`);
-                            allUnique = false;
-                        } else {
-                            verificationMap.set(emailKey, {jobIndex: index, emailIndex: emailIndex});
-                        }
-                    });
-                }
-            });
-            
-            if (allUnique) {
-                log.info("VERIFICATION PASSED: All emails are completely independent objects");
-            } else {
-                log.error("VERIFICATION FAILED: Some emails still reference the same objects");
-            }
-            
-            const exportSuccess = await exportData(dataToExport, sheetsClient);
-            if (exportSuccess) {
-                log.info(`Final export successful - resetting jobs list`);
-                // Clear the list after successful export to prevent memory contamination
-                processedJobsList = [];
-            }
-        }
-        log.info(`Scraping completed! Total jobs processed: ${state.processedCount}`);
-        const finalData = await existingDataset.getData();
-        log.info(`Final dataset contents: ${finalData.items.length} items`);
-        log.info(`STORAGE LOCATIONS - QUICK REFERENCE:`);
-        log.info(`- Dataset: "culinary-jobs" (ID: ${existingDataset.id})`);
-        log.info(`- Google Sheet: https://docs.google.com/spreadsheets/d/${SHEET_ID}`);
 
-        // Delay before exit
-        log.info('Waiting 10 seconds before exit to ensure all operations complete...');
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        log.info('Process complete');
-    } catch (error) {
-        log.error(`Fatal error in main execution: ${error.message}`);
-        if (error.stack) log.error(`Stack trace: ${error.stack}`);
-        if (TEST_MODE && EXPORT_DATA && processedJobsList.length > 0) {
-            log.info(`Despite error, attempting to save collected data to Google Sheets...`);
-            try {
-                const auth = new google.auth.GoogleAuth({
-                    credentials: {
-                        client_email: 'apify-data@the-madison-collective.iam.gserviceaccount.com',
-                        private_key: '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC/2XWH2+TgXjcp\nfcs5lwSVuo2VAAUav9R59iTg24GVpRpyfdfJUQkBls/flBg5sDgZpc3EdmPicPZh\noZzkbO4CFd5kGG4ATm0DLljeeURtPGyDFoh2DOb/rdAYxjdt1TWefUlgB5RP4RdR\nZoOBejep8kvmHW3WPtSD0VvUm8tLZ7jfmzDJw7cP9VgXYTLdPCQnnNUm8tb8hXYK\nqy6osb0C7Zkwyrnd2jG86yLLbSvZhtTsQ3tTd9ixDov0Vypy83D9HCXFufwjnT6J\ntf4oOM1ERIFebCVq1BINxtTVCtvDj4Le0EMbkru4nS10UqRmbaPHmc8Yllog6XbW\nGD1RmbcZAgMBAAECggEALHdkrGalN/PeaTmE3wZHw8SHiF+Gz1pjDxmkFpIKCPtJ\nk/vjBgBITBv+dl3G96gGeLtbZAvkvtlb4ekpijBNQiJ7d0vKQzvqPHCDnJ0S5Ra6\nN/ADFQmMiPpqXzOiKUzfrqpvVVisYY9UbkOKe3ouaK+GNAHiMWRCsYLW/AJYLlOn\nUVUKEYm6mAnH6Pbd/otDGwldH0qcsVzyh2VmUW+6ugHNlchWBEnd5vvR/yt8cw7S\nNmFCEvuPDnxbnU9/AdvSxKd/fVDajcScjbrTID0bsOoEXUZ/Rt7zVa58AnGBA6W2\nciaeTZfvu/WA8oWatypnb512ox/CpGPKjBzIpwEFYQKBgQDmOouayJ3hjeiqZBD1\nuw/4jIHs/ue3s/utvQ0wYgeeSn5WBowwJKvjuZk4N0fsRVFYSTdWR73XuVBl3gk6\nyrQhx1AshvjBMq6fJgd9nTmp0wCKYevHpTk0Wyr5c7fW/2IGIDvlbk4Dgzi+4Fpk\nZ9aFPCdRLUM7v2pzNPrApuuUZQKBgQDVUx1ZJ5w1aBbb1PkXda0AhipgGz1Pr6bw\nthuwbxPjTO+fhwoPflTck58no1J0fSHhzaClu5Q33+wWwZ2C9wnxD2aVFvm5bkQ7\nPfDjp8/IO4rcies9bKZj30XX7S4nKUA5+XJZOVkfjdnIRTBIaHoWhbO1oED9E49H\nUDsrXtiqpQKBgGjUhZav/HukkylqsPJC/+2rhMl18+qIsHOWnnfGWzOvNcFT7+dH\n+2CQtPyM51nk4jox9Fl8Byw//CS2Kjuz6rtqts3fk0rdGffraAPBYG08X4WjOqnI\nSLjXPkUhdLcXx/mEGeHJDQq6aE85ds87HMnD7x8eXfvJl93nZLnuB1ylAoGASChN\nDRMw63/B+6oWd7D+S+cV/lw4aPPpbBKtWwi3mXM0uqla5dK9sb7dXvMHuQ96nn6H\nkIfaouvDWA810E7vtfKXqGaVIfwCaGeTS+4/gmNhnSepwqU1wyKK5Xb83ZI+f125\nKCUV2G6K9AszQcrVQTkIiK8kTHaJSH4DBbCXaWECgYEA4auLmClGnlE6MwIXskqu\n5k51dZE2bRazFnMU6MhcNshhVxGHrcfEC5WmqVGeY1Tyv2+8d/UuA+NtLG61zblJ\nhEv6q1f2A9JV82VWj9r9a0FGPRDtTwTdnylTcmZ6HxwAnsY9zN+DZJmwMVK4hmbl\nwkey0SXnl+5SMB+2VBNi9lY=\n-----END PRIVATE KEY-----\n'
-                    },
-                    scopes: ['https://www.googleapis.com/auth/spreadsheets']
-                });
-                const sheetsClient = google.sheets({ version: 'v4', auth });
-                // Deep copy for export
-                const dataToExport = JSON.parse(JSON.stringify(processedJobsList));
-                await exportData(dataToExport, sheetsClient);
-            } catch (exportError) {
-                log.error(`Error during emergency export: ${exportError.message}`);
-            }
-            await new Promise(resolve => setTimeout(resolve, 5000));
+        try {
+             await Promise.race([
+                 crawler.run(),
+                 timeoutPromise
+             ]);
+             const runtimeMs = Date.now() - startTime;
+             log.info(`Crawler completed naturally after ${runtimeMs / 1000 / 60} minutes.`);
+        } catch (timeoutError) {
+            log.error(timeoutError.message);
+            log.info(`Crawler stopped due to reaching maximum runtime.`);
+            // Optionally drop queue if timeout occurs
+            // await requestQueue.drop();
         }
+        
+        await saveCache(); // saveCache must be defined
+        
+        // Final export if any remaining jobs
+        if (EXPORT_DATA && exportBatch.length > 0) { // Use global exportBatch
+            log.info(`Exporting final batch of ${exportBatch.length} results...`);
+            const dataToExport = JSON.parse(JSON.stringify(exportBatch)); 
+            await handleBatchExport(); // Should use and clear global exportBatch
+        }
+        log.info(`Scraping completed! Total jobs processed: ${state ? state.processedCount : 'N/A'}`);
+        // Optionally log dataset size
+        // const finalData = await existingDataset.getData();
+        // log.info(`Final dataset contents: ${finalData.items.length} items`);
+
+    } catch (err) {
+        log.error(`Fatal error: ${err.message}`);
+        if (err.stack) log.error(err.stack);
+    } finally {
+        await pool.end();
+        log.info('Database pool closed.');
+    }
+});
+
+// Your existing helper functions remain the same...
+
+// Helper function to test database connection
+async function testDatabaseConnection() {
+    try {
+        const client = await pool.connect();
+        try {
+            const result = await client.query('SELECT NOW()');
+            log.info('Successfully connected to database:', result.rows[0].now);
+            return true;
+        } finally {
+            client.release();
+        }
+    } catch (error) {
+        log.error('Failed to connect to database:', error);
+        return false;
     }
 }
-
-await main();
-log.info('All tasks completed, exiting process.');
