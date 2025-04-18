@@ -9,7 +9,8 @@
         "crawlee": "^3.11.5",
         "dotenv": "^16.4.7",
         "node-fetch": "^3.3.2",
-        "pg": "^8.14.1"
+        "pg": "^8.14.1",
+        "resend": "^4.3.0"
     },
     "devDependencies": {
         "@apify/eslint-config": "^0.4.0",

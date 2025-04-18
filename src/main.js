@@ -3,6 +3,7 @@ import cheerio from 'cheerio';
 import fetch from 'node-fetch';
 import { Actor } from 'apify';
 import pkg from 'pg';
+import { Resend } from 'resend'; // Added for email notifications
 const { Pool } = pkg;
 
 // Configuration
@@ -1135,7 +1136,8 @@ async function getCompanyInfoWithSource(companyName, locationName = '', source =
     // Clean special characters from company name
     const withoutSpecialChars = cleanSpecialCharacters(companyName);
     // Preserve capitalization for company names like "STARR Restaurants"
-    const cleanedName = cleanCompanyName(withoutSpecialChars);
+    // REMOVED call to cleanCompanyName to avoid stripping significant words like "Group"
+    const cleanedName = withoutSpecialChars; 
     
     // Log both original and cleaned versions
     log.info(`${source} name: "${companyName}" cleaned to "${cleanedName}"`);
@@ -2025,6 +2027,12 @@ async function createTables() {
 
 // Use Actor.main() for the main execution block
 Actor.main(async () => {
+    const startTime = Date.now(); // Track start time
+    let newlyAddedJobs = [];
+    let skippedDuplicateJobs = [];
+    let skippedExcludedJobs = [];
+    let state = null; // Initialize state here to access in finally block
+
     try {
         // Test database connection first
         if (!await testDatabaseConnection()) { // Ensure testDatabaseConnection is defined below
@@ -2040,9 +2048,13 @@ Actor.main(async () => {
             throw dbError;
         }
 
+        // Load existing job URLs from the database BEFORE starting the crawler
+        const existingUrlsFromDB = await loadExistingJobUrlsFromDB();
+
         // Initialize state store and request queue
         const stateStore = await KeyValueStore.open();
-        const state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0 };
+        // state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0 }; // Moved initialization up
+        state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0 }; 
         const requestQueue = await RequestQueue.open();
 
         // Add initial search URL
@@ -2077,12 +2089,12 @@ Actor.main(async () => {
                 // Assume existingDataset is initialized outside
                 const existingDataset = await Dataset.open('culinary-jobs'); 
                 
+                // *** REMOVED PLACEHOLDER ***
                 // Assume existingUrls Set is initialized outside and populated if needed
-                const existingUrls = new Set(); // Placeholder - this needs proper initialization
+                // const existingUrls = new Set(); // Placeholder - this needs proper initialization
 
                 // Assume processedJobsList array is initialized outside for batching
                 // let processedJobsList = []; // Placeholder - this needs proper initialization
-                // Note: exportBatch is already global, maybe use that instead? Using exportBatch for now.
 
                 if (request.userData?.page === 1 || !request.userData?.page) {
                     const totalJobsText = $('.jobs-count-total').text().trim();
@@ -2102,14 +2114,32 @@ Actor.main(async () => {
                 for (let i = 0; i < cardsToProcess; i++) {
                     const el = jobCards[i];
                     const jobUrl = ensureAbsoluteUrl($(el).attr('href')); // ensureAbsoluteUrl must be defined
-                    if (!jobUrl || existingUrls.has(jobUrl)) {
-                        if (jobUrl) log.info(`Skipping existing job: ${jobUrl}`);
+                    
+                    // *** USE THE SET LOADED FROM DB ***
+                    if (!jobUrl || existingUrlsFromDB.has(jobUrl)) {
+                        if (jobUrl) {
+                            log.info(`Skipping existing job: ${jobUrl}`);
+                            // Track skipped duplicate
+                            skippedDuplicateJobs.push({ 
+                                url: jobUrl,
+                                title: $(el).find('.job-title strong').text().trim() || 'N/A',
+                                rawCompany: $(el).find('.text-body.text-ellipsis:not(.job-employment)').text().trim() || 'N/A' 
+                            });
+                        }
                         continue;
                     }
                     const title = $(el).find('.job-title strong').text().trim() || 'Unknown';
                     const rawCompany = $(el).find('.text-body.text-ellipsis:not(.job-employment)').text().trim() || 'Unknown';
                     const { name: company } = parseCompanyAndLocation(rawCompany); // parseCompanyAndLocation must be defined
                     const fullAddress = $(el).find('.text-muted.text-ellipsis').text().trim() || 'N/A';
+                    
+                    // Skip excluded companies entirely
+                    if (company.startsWith('Excluded')) {
+                        log.info(`Skipping excluded company job: ${title} at ${rawCompany} (URL: ${jobUrl})`);
+                        // Track skipped exclusion
+                        skippedExcludedJobs.push({ url: jobUrl, title, rawCompany, reason: company });
+                        continue; // Go to the next job card, don't add this one to listings
+                    }
                     
                     listings.push({ 
                         url: jobUrl, 
@@ -2258,6 +2288,13 @@ Actor.main(async () => {
                             
                             const verifiedDetail = JSON.parse(JSON.stringify(jobDetail));
                             jobDetailsArray.push(verifiedDetail);
+                            // Track newly added job details for reporting
+                            newlyAddedJobs.push({ 
+                                title: verifiedDetail.title, 
+                                company: verifiedDetail.company, 
+                                parentCompany: verifiedDetail.parentCompany, 
+                                location: verifiedDetail.location 
+                            });
                             log.info(`Processed job: ${listing.title} at ${listing.company} with ${verifiedDetail.emails.length} contacts`);
                             state.processedCount = (state.processedCount || 0) + 1;
                         } catch (error) {
@@ -2310,14 +2347,25 @@ Actor.main(async () => {
                 
                 const nextPage = request.userData?.page || 1;
                 const totalJobsTarget = TEST_MODE ? TEST_JOB_LIMIT : (await stateStore.getValue('TOTAL_JOBS') || 2000);
-                
-                if (state.processedCount < totalJobsTarget) {
-                    const nextPageUrl = `https://culinaryagents.com/search/jobs?search%5Bcompensation%5D%5B%5D=salary&offset=${nextPage * 20}`;
-                    log.info(`Queueing next page: ${nextPageUrl}`);
-                    await delay(TEST_MODE ? 5000 : 30000);
+                const jobsPerPage = 20; // Culinary Agents shows 20 jobs per page
+                const maxPages = Math.ceil(totalJobsTarget / jobsPerPage);
+                const currentOffset = (nextPage -1) * jobsPerPage; // Offset of the page *just processed*
+
+                // --- MODIFIED STOPPING CONDITION ---
+                // Stop if we've processed enough *or* if the next page would exceed the total expected jobs
+                if (state.processedCount < totalJobsTarget && nextPage <= maxPages) {
+                // --- END MODIFICATION ---
+
+                    const nextPageUrl = `https://culinaryagents.com/search/jobs?search%5Bcompensation%5D%5B%5D=salary&offset=${nextPage * jobsPerPage}`; // Use jobsPerPage here
+                    log.info(`Queueing next page (${nextPage + 1}/${maxPages}): ${nextPageUrl}`);
+                    await delay(TEST_MODE ? 5000 : 30000); // Consider reducing delay if only skipping
                     await requestQueue.addRequest({ url: nextPageUrl, userData: { page: nextPage + 1 } });
                 } else {
-                    log.info(`Reached target of ${totalJobsTarget} jobs. No more pages will be queued.`);
+                    if (nextPage > maxPages) {
+                         log.info(`Reached maximum expected page (${maxPages}) based on total jobs (${totalJobsTarget}). No more pages will be queued.`);
+                    } else {
+                        log.info(`Reached target processing count of ${state.processedCount}/${totalJobsTarget} jobs. No more pages will be queued.`);
+                    }
                     await stateStore.setValue('SCRAPE_STATE', state);
                 }
                 // --- END: Logic from provided snippet --- 
@@ -2369,10 +2417,143 @@ Actor.main(async () => {
         log.error(`Fatal error: ${err.message}`);
         if (err.stack) log.error(err.stack);
     } finally {
+        // Ensure final batch export happens even on error/timeout
+        if (EXPORT_DATA && exportBatch.length > 0) { // Use global exportBatch
+            log.warn(`Error or timeout occurred. Exporting final batch of ${exportBatch.length} results...`);
+            try {
+                await handleBatchExport(); 
+            } catch (exportError) {
+                log.error("Error during final batch export in finally block:", exportError);
+            }
+        }
+
+        // Send completion email
+        const endTime = Date.now();
+        const durationMs = endTime - startTime;
+        await sendCompletionEmail({
+            startTime,
+            endTime,
+            durationMs,
+            processedCount: state ? state.processedCount : 0,
+            newlyAddedJobs,
+            skippedDuplicateJobs,
+            skippedExcludedJobs
+        });
+
         await pool.end();
-        log.info('Database pool closed.');
+        log.info("Database pool closed.");
     }
 });
+
+// *** ADDED FUNCTION: Send Completion Email ***
+async function sendCompletionEmail(stats) {
+    log.info("Preparing completion email...");
+    const apiKey = process.env.RESEND_API_KEY;
+
+    if (!apiKey) {
+        log.warn("RESEND_API_KEY environment variable not found. Skipping email notification.");
+        return;
+    }
+
+    const resend = new Resend(apiKey);
+
+    // --- Fetch Random Quote ---
+    let quoteHtml = '';
+    try {
+        log.info("Fetching random quote...");
+        const quoteResponse = await fetch('https://api.realinspire.live/v1/quotes/random');
+        if (quoteResponse.ok) {
+            const quoteData = await quoteResponse.json();
+            if (Array.isArray(quoteData) && quoteData.length > 0) {
+                const quote = quoteData[0];
+                if (quote.content && quote.author) {
+                    quoteHtml = `<p style="font-style: italic; margin-top: 20px; padding-top: 10px; border-top: 1px dashed #ccc;">"${quote.content}" - ${quote.author}</p>`;
+                    log.info(`Quote fetched: "${quote.content}"`);
+                }
+            }
+        } else {
+            log.warn(`Failed to fetch quote: ${quoteResponse.status}`);
+        }
+    } catch (quoteError) {
+        log.error("Error fetching random quote:", quoteError);
+    }
+    // --- End Fetch Random Quote ---
+
+    // Format Date/Time in PST
+    const completionTimePST = new Date(stats.endTime).toLocaleString("en-US", { 
+        timeZone: "America/Los_Angeles",
+        year: 'numeric', month: 'long', day: 'numeric', 
+        hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true 
+    });
+    const todayDate = new Date().toLocaleDateString("en-US", { 
+        timeZone: "America/Los_Angeles",
+        year: 'numeric', month: 'long', day: 'numeric'
+    });
+
+    // Format Lists
+    // Updated to accept inline style string
+    const formatJobList = (jobList, includeParent = false, itemStyle = "") => { // Corrected default parameter syntax
+        if (!jobList || jobList.length === 0) return `<li style="${itemStyle}">None</li>`;
+        return jobList.map(job => 
+            `<li style="${itemStyle}">${job.title || 'N/A'} at ${job.company || job.rawCompany || 'N/A'} ${includeParent && job.parentCompany && job.parentCompany !== 'N/A' ? `(Parent: ${job.parentCompany})` : ''} - ${job.location || 'N/A'}</li>`
+        ).join("");
+    };
+
+    const newJobStyle = 'font-size: 12pt; color: #90EE90; text-align: left;';
+    const excludedJobStyle = 'font-size: 12pt; color: #FFFF00; text-align: left;'; // Yellow might be hard to read
+
+    const newlyAddedListHtml = formatJobList(stats.newlyAddedJobs, true, newJobStyle);
+    const skippedExcludedListHtml = formatJobList(stats.skippedExcludedJobs.map(j => ({...j, company: j.rawCompany})), false, excludedJobStyle);
+    // Note: skippedDuplicateJobs only has rawCompany, so we format it slightly differently if needed
+    // const skippedDuplicateListHtml = formatJobList(stats.skippedDuplicateJobs, false);
+
+    const subject = `BizDev Results for ${todayDate}`;
+    const htmlBody = `
+        <p style="font-weight: bold; font-size: 24pt; color: #000000; text-align: center;">Your Culinary Agent scraper completed at ${completionTimePST}</p>
+        <p>Duration: ${Math.round(stats.durationMs / 60000)} minutes (${Math.round(stats.durationMs / 1000)} seconds)</p>
+        
+        <h2>Summary</h2>
+        <ul>
+            <li><b>${stats.newlyAddedJobs.length}</b> new listings were processed and added/updated in the database.</li>
+            <li><b>${stats.skippedDuplicateJobs.length}</b> listings were skipped (already in DB).</li>
+            <li><b>${stats.skippedExcludedJobs.length}</b> listings were skipped (excluded company).</li>
+        </ul>
+
+        <h2>New Listings Processed:</h2>
+        <ul style="list-style-type: none; padding-left: 0;">
+            ${newlyAddedListHtml}
+        </ul>
+
+        <hr>
+
+        <h2>Excluded Listings Skipped:</h2>
+        <ul style="list-style-type: none; padding-left: 0;">
+            ${skippedExcludedListHtml}
+        </ul>
+
+        ${quoteHtml} {/* Insert the fetched quote here */}
+
+        <p>You can review new listings at <a href="https://madisonbizdev-production.up.railway.app/">https://madisonbizdev-production.up.railway.app/</a></p>
+    `;
+
+    try {
+        log.info(`Sending completion email to aj@chefsheet.com...`);
+        const { data, error } = await resend.emails.send({
+            from: 'Culinary Scraper <onboarding@resend.dev>', // Sender name is good practice
+            to: ['aj@chefsheet.com'], // Use array for recipients
+            subject: subject,
+            html: htmlBody,
+        });
+
+        if (error) {
+            log.error("Failed to send completion email via Resend:", error);
+        } else {
+            log.info("Completion email sent successfully:", data);
+        }
+    } catch (emailError) {
+        log.error("Error during email sending process:", emailError);
+    }
+}
 
 // Your existing helper functions remain the same...
 
@@ -2390,5 +2571,34 @@ async function testDatabaseConnection() {
     } catch (error) {
         log.error('Failed to connect to database:', error);
         return false;
+    }
+}
+
+// *** ADDED FUNCTION ***
+// Helper function to load existing job URLs from the database
+async function loadExistingJobUrlsFromDB() {
+    log.info('Loading existing job URLs from database...');
+    const existingUrls = new Set();
+    let client;
+    try {
+        client = await pool.connect();
+        const result = await client.query('SELECT url FROM culinary_jobs');
+        if (result.rows && result.rows.length > 0) {
+            result.rows.forEach(row => {
+                if (row.url) {
+                    existingUrls.add(row.url);
+                }
+            });
+        }
+        log.info(`Loaded ${existingUrls.size} existing job URLs from the database.`);
+        return existingUrls;
+    } catch (error) {
+        log.error('Failed to load existing job URLs from database:', error);
+        // Return an empty set to allow the crawler to proceed, though it might process duplicates
+        return existingUrls; 
+    } finally {
+        if (client) {
+            client.release();
+        }
     }
 }
