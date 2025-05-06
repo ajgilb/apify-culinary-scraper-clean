@@ -6,10 +6,31 @@ import pkg from 'pg';
 import { Resend } from 'resend'; // Added for email notifications
 const { Pool } = pkg;
 
+// Load environment variables from .env files when running locally
+import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+
+if (!process.env.APIFY_IS_AT_HOME) {
+    // Try to load from .env.local first (preferred for local development)
+    const localEnvPath = path.resolve(process.cwd(), '.env.local');
+    const defaultEnvPath = path.resolve(process.cwd(), '.env');
+
+    if (fs.existsSync(localEnvPath)) {
+        dotenv.config({ path: localEnvPath });
+        log.info('Loaded environment variables from .env.local file');
+    } else if (fs.existsSync(defaultEnvPath)) {
+        dotenv.config();
+        log.info('Loaded environment variables from .env file');
+    } else {
+        log.warning('No .env or .env.local file found');
+    }
+}
+
 // Configuration
-const TEST_MODE = false;  // Running in production mode
-const TEST_JOB_LIMIT = 5;
-const EXPORT_DATA = true;
+let TEST_MODE = true;  // Running in production mode
+let TEST_JOB_LIMIT = 5;
+let EXPORT_DATA = true;
 
 const BATCH_SIZE = 9;
 const BASE_URL = 'https://culinaryagents.com';
@@ -59,7 +80,7 @@ const EXCLUDED_COMPANIES = new Set([
     "Chartwells", "Compass", "CORE Recruitment", "EHS Recruiting", "Empowered Hospitality",
     "Eurest", "Goodwin Recruiting", "HMG Plus - New York", "LSG Sky Chefs", "Major Food Group",
     "Measured HR", "One Haus", "Patrice & Associates", "Persone NYC", "Playbook Advisors",
-    "Restaurant Associates", "Source One Hospitality", "STARR", "Ten Five Hospitality",
+    "Restaurant Associates", "Source One Hospitality", "Ten Five Hospitality",
     "The Goodkind Group", "Tuttle Hospitality", "Willow Tree Recruiting",
     // Adding Washington variants
     "washington", "washington dc", "washington d.c.", "washington d c"
@@ -98,30 +119,30 @@ function cleanSpecialCharacters(text) {
 // List of common country-specific TLDs that aren't US-based
 const COUNTRY_TLDS = [
     // European countries
-    '.uk', '.co.uk', '.ac.uk', '.org.uk', '.eu', '.de', '.fr', '.es', '.it', '.nl', '.be', '.dk', 
-    '.se', '.no', '.fi', '.is', '.ie', '.ch', '.at', '.pt', '.pl', '.cz', '.sk', '.hu', '.ro', 
+    '.uk', '.co.uk', '.ac.uk', '.org.uk', '.eu', '.de', '.fr', '.es', '.it', '.nl', '.be', '.dk',
+    '.se', '.no', '.fi', '.is', '.ie', '.ch', '.at', '.pt', '.pl', '.cz', '.sk', '.hu', '.ro',
     '.bg', '.gr', '.ru', '.by', '.ua', '.hr', '.si', '.rs', '.me', '.lu', '.li', '.mt', '.cy',
-    
+
     // Asia Pacific
-    '.cn', '.jp', '.kr', '.hk', '.tw', '.sg', '.in', '.my', '.id', '.th', '.vn', '.ph', '.au', 
+    '.cn', '.jp', '.kr', '.hk', '.tw', '.sg', '.in', '.my', '.id', '.th', '.vn', '.ph', '.au',
     '.nz', '.fj', '.pk', '.bd', '.kz', '.np', '.lk',
-    
+
     // Americas (excluding .us)
     '.ca', '.mx', '.br', '.ar', '.cl', '.pe', '.ve', '.ec', '.bo', '.py', '.uy', '.cr',
     '.gt', '.pa', '.do', '.cu', '.hn', '.sv', '.ni', '.bs', '.tt', '.jm', '.ht', '.pr',
     // Note: .co is excluded as it's commonly used in the US as an alternative to .com
-    
+
     // Africa & Middle East
     '.za', '.eg', '.ma', '.ng', '.ke', '.gh', '.tz', '.il', '.sa', '.ae', '.qa', '.kw', '.bh',
     '.om', '.jo', '.lb', '.dz', '.tn', '.zm', '.zw', '.et', '.mu', '.re',
-    
+
     // City TLDs (mostly international)
     '.london', '.paris', '.berlin', '.moscow', '.tokyo', '.dubai', '.amsterdam', '.vienna',
     '.barcelona', '.istanbul', '.sydney', '.melbourne', '.toronto', '.quebec', '.rio',
-    
+
     // Generic internationalized TLDs
     '.asia', '.international', '.global', '.world', '.international',
-    
+
     // Common second-level domains in other countries
     '.com.au', '.co.nz', '.co.jp', '.co.uk', '.co.za', '.co.in', '.com.sg', '.com.my',
     '.com.br', '.com.mx', '.com.ar', '.com.cn', '.com.hk', '.com.tw'
@@ -129,7 +150,7 @@ const COUNTRY_TLDS = [
 
 // Generic email patterns to deprioritize
 const GENERIC_EMAIL_PATTERNS = [
-    'info@', 'contact@', 'hello@', 'admin@', 'support@', 
+    'info@', 'contact@', 'hello@', 'admin@', 'support@',
     'office@', 'mail@', 'inquiry@', 'general@', 'sales@',
     'help@', 'service@', 'hr@', 'jobs@', 'careers@',
     'team@', 'marketing@', 'press@', 'media@', 'events@'
@@ -142,53 +163,53 @@ const TITLE_PRIORITY = [
     'head of hr', 'head of human resources', 'head of people', 'head of talent',
     'hr director', 'human resources director', 'people director', 'talent director', 'talent acquisition director',
     'vp of hr', 'vp of human resources', 'vp of people', 'vp of talent', 'vp of talent acquisition',
-    'people operations', 'people ops', 'talent operations', 
+    'people operations', 'people ops', 'talent operations',
     'hr manager', 'human resources manager', 'people manager', 'talent manager', 'talent acquisition manager',
     'hr specialist', 'human resources specialist', 'people specialist', 'talent specialist',
     'recruiter', 'talent recruiter', 'technical recruiter', 'executive recruiter',
     'hr', 'human resources', 'people', 'talent', 'talent acquisition',
-    
+
     // C-level executives
-    'ceo', 'chief executive officer', 
-    'president', 
+    'ceo', 'chief executive officer',
+    'president',
     'coo', 'chief operating officer',
     'chief people officer', 'chief talent officer',
     'chief',
-    
+
     // Regional/Area Leadership (higher than local managers)
     'regional director', 'area director', 'district director',
     'regional manager', 'area manager', 'district manager',
-    'regional', 'area', 'district', 
-    
+    'regional', 'area', 'district',
+
     // Directors
     'director of operations', 'operations director',
-    'director of hr', 'director of human resources', 'director of people', 
+    'director of hr', 'director of human resources', 'director of people',
     'director of recruiting', 'recruiting director',
-    'director', 
-    
+    'director',
+
     // Other executives/management
-    'vice president', 'vp', 
+    'vice president', 'vp',
     'general manager', 'gm',
     'manager',
-    'executive', 
+    'executive',
     'founder', 'owner', 'partner',
-    
+
     // Other terms (lowest priority)
     'recruiting', 'hiring', 'employment', 'personnel'
 ];
 
 function getTitlePriority(title) {
     if (!title) return TITLE_PRIORITY.length + 1;
-    
+
     const lowerTitle = title.toLowerCase();
     let highestPriority = TITLE_PRIORITY.length + 1;
-    
+
     // First check for exact matches (highest precedence)
     const exactMatchIndex = TITLE_PRIORITY.indexOf(lowerTitle);
     if (exactMatchIndex !== -1) {
         return exactMatchIndex;
     }
-    
+
     // Special case handling for HR/Talent/People roles with different word order
     // This specifically targets cases like "Manager of HR" vs "HR Manager"
     const roleTypes = [
@@ -196,7 +217,7 @@ function getTitlePriority(title) {
         { key: "talent", alt: "talent acquisition" },
         { key: "people", alt: "people operations" }
     ];
-    
+
     const levelTypes = [
         { key: "manager", alt: "manager of" },
         { key: "director", alt: "director of" },
@@ -204,7 +225,7 @@ function getTitlePriority(title) {
         { key: "head", alt: "head of" },
         { key: "chief", alt: "chief" }
     ];
-    
+
     // Check all combinations of role + level to handle different word orders
     for (const role of roleTypes) {
         for (const level of levelTypes) {
@@ -212,47 +233,47 @@ function getTitlePriority(title) {
             // 1. "{role} {level}" (e.g., "HR Manager")
             // 2. "{level} of {role}" (e.g., "Manager of HR")
             // 3. "{level}, {role}" (e.g., "Manager, Human Resources")
-            
+
             const patternA = `${role.key} ${level.key}`;
             const patternB = `${level.key} of ${role.key}`;
             const patternC = `${level.key}, ${role.key}`;
-            
+
             const patternD = `${role.alt} ${level.key}`;
             const patternE = `${level.key} of ${role.alt}`;
             const patternF = `${level.key}, ${role.alt}`;
-            
+
             const patternG = `${level.alt} ${role.key}`;
             const patternH = `${level.alt} ${role.alt}`;
-            
+
             // Find the standard form in our priority list
             let standardForm = `${role.key} ${level.key}`;
             let standardIndex = TITLE_PRIORITY.indexOf(standardForm);
-            
+
             if (standardIndex === -1) {
                 standardForm = `${role.alt} ${level.key}`;
                 standardIndex = TITLE_PRIORITY.indexOf(standardForm);
             }
-            
+
             // If we have a standard form for this role+level combo
             if (standardIndex !== -1) {
                 // Check if any of our patterns match the title
-                if (lowerTitle.includes(patternA) || lowerTitle.includes(patternB) || 
+                if (lowerTitle.includes(patternA) || lowerTitle.includes(patternB) ||
                     lowerTitle.includes(patternC) || lowerTitle.includes(patternD) ||
                     lowerTitle.includes(patternE) || lowerTitle.includes(patternF) ||
                     lowerTitle.includes(patternG) || lowerTitle.includes(patternH)) {
-                    
+
                     highestPriority = standardIndex;
                     return highestPriority; // Return immediately for these special matches
                 }
             }
         }
     }
-    
+
     // Special handling for VP and Head titles
     if ((lowerTitle.includes('vp') || lowerTitle.includes('vice president')) &&
-        (lowerTitle.includes('hr') || lowerTitle.includes('human resources') || 
+        (lowerTitle.includes('hr') || lowerTitle.includes('human resources') ||
          lowerTitle.includes('people') || lowerTitle.includes('talent'))) {
-        
+
         // Find the best matching VP term
         for (let i = 0; i < TITLE_PRIORITY.length; i++) {
             const term = TITLE_PRIORITY[i];
@@ -262,11 +283,11 @@ function getTitlePriority(title) {
             }
         }
     }
-    
+
     // Then look for substring matches, prioritizing longer matches first
     for (let i = 0; i < TITLE_PRIORITY.length; i++) {
         const priorityTerm = TITLE_PRIORITY[i];
-        
+
         // For multi-word terms, check if all words appear in the title
         // This helps match "Director of Human Resources" with "Human Resources Director"
         if (priorityTerm.includes(' ')) {
@@ -276,11 +297,11 @@ function getTitlePriority(title) {
                 break;
             }
         }
-        
+
         // Special handling for "chief" to avoid matching "chief cook" as "chief"
         if (priorityTerm === 'chief' && lowerTitle.includes('chief')) {
-            const isRealChief = /(^|\s)chief($|\s|,)/.test(lowerTitle) || 
-                                lowerTitle.includes('chief ') && 
+            const isRealChief = /(^|\s)chief($|\s|,)/.test(lowerTitle) ||
+                                lowerTitle.includes('chief ') &&
                                 !lowerTitle.includes('chief cook');
             if (isRealChief) {
                 highestPriority = i;
@@ -293,7 +314,7 @@ function getTitlePriority(title) {
             break;
         }
     }
-    
+
     return highestPriority;
 }
 
@@ -304,7 +325,7 @@ function truncateText(text, maxLength = MAX_CELL_LENGTH) {
 
 function cleanCompanyName(input) {
     if (!input || typeof input !== 'string') return '';
-    
+
     // Keep the full name for companies with multiple words
     let cleaned = input
         // Remove common business entity suffixes
@@ -312,7 +333,7 @@ function cleanCompanyName(input) {
         // Remove location markers
         .replace(/\s+[,-]\s+.*$/, '')
         .trim();
-    
+
     return cleaned || input;
 }
 
@@ -322,19 +343,19 @@ export function parseCompanyAndLocation(rawName) {
     if (!rawName || rawName === 'Unknown') {
         return { name: 'Unknown', location: '' };
     }
-    
+
     log.info(`Parsing company name from: "${rawName}"`);
-    
+
     // List of generic industry terms that shouldn't be treated as company names on their own
     const genericTerms = [
-        'restaurant group', 'hospitality group', 'restaurant', 'hospitality', 
-        'group', 'consulting', 'management', 'restaurant consulting', 
+        'restaurant group', 'hospitality group', 'restaurant', 'hospitality',
+        'group', 'consulting', 'management', 'restaurant consulting',
         'hospitality consulting', 'food and beverage', 'f&b',
         'bar', 'cafe', 'bistro', 'tavern', 'eatery', 'catering',
         'culinary', 'culinary group', 'bakery', 'dining', 'dining group',
         'restaurant management', 'hospitality management', 'fine dining'
     ];
-    
+
     // Common locations that might appear without proper spacing
     // Also used to detect if a string is just a location name
     // Expanded list based on US major cities and common state abbreviations
@@ -351,28 +372,28 @@ export function parseCompanyAndLocation(rawName) {
         'Tulsa', 'Cleveland', 'Wichita', 'Arlington', 'New Orleans', 'Bakersfield',
         'Tampa', 'Honolulu', 'Aurora', 'Anaheim', 'Santa Ana', 'St. Louis',
         'Pittsburgh', 'Cincinnati', 'Henderson', 'Riverside', 'St. Paul',
-        
+
         // NYC boroughs
         'Manhattan', 'Brooklyn', 'Queens', 'The Bronx', 'Staten Island', 'NYC',
-        
+
         // Common state abbreviations
-        'NY', 'LA', 'IL', 'CA', 'FL', 'TX', 'GA', 'MA', 'SF', 'DC', 'PA', 
-        'WA', 'CO', 'AZ', 'TN', 'MO', 'OR', 'NV', 'KY', 'IN', 'OH', 'NC', 
+        'NY', 'LA', 'IL', 'CA', 'FL', 'TX', 'GA', 'MA', 'SF', 'DC', 'PA',
+        'WA', 'CO', 'AZ', 'TN', 'MO', 'OR', 'NV', 'KY', 'IN', 'OH', 'NC',
         'MI', 'MD', 'VA', 'NJ', 'MN'
     ];
-    
+
     // List of known restaurant group keywords - used to identify company names in complex strings
     const restaurantKeywords = [
         'restaurants by', 'restaurants of', 'restaurant group', 'hospitality group',
         'dining group', 'food group', 'culinary group', 'chef', 'kitchen',
         'bistro', 'cafe', 'dining', 'eatery', 'tavern', 'grill', 'restaurant'
     ];
-    
+
     // Step 0: Early check for excluded companies regardless of formatting
     // This catches cases like "Whole FoodsAustin" where spacing is missing
     const cleanedRawName = cleanSpecialCharacters(rawName); // Remove special characters
     const normalizedRawName = cleanedRawName.toLowerCase().replace(/\s+/g, '');
-    
+
     // Check for excluded companies with normalized spaces
     for (const excludedName of PARTIAL_EXCLUSIONS) {
         const normalizedExcludedName = excludedName.replace(/\s+/g, '');
@@ -381,33 +402,33 @@ export function parseCompanyAndLocation(rawName) {
             return { name: `Excluded: ${excludedName}`, location: '' };
         }
     }
-    
+
     // Check for exact matches in the exclusion list
     const rawNameLower = cleanedRawName.toLowerCase();
     if (Array.from(EXCLUDED_COMPANIES).some(excluded => rawNameLower.includes(excluded))) {
         log.info(`Early exact exclusion match in "${rawName}"`);
         return { name: 'Excluded', location: '' };
     }
-    
+
     // Step 1: Check if the input starts with a location
     // This is a common pattern in listings like "New York, NY • Restaurant Group"
-    const startsWithLocation = commonLocations.some(loc => 
+    const startsWithLocation = commonLocations.some(loc =>
         rawNameLower.startsWith(loc.toLowerCase())
     );
-    
+
     if (startsWithLocation && rawName.includes('•')) {
         // If it starts with a location and has industry classification, it's likely not a company
         log.info(`Input starts with location and contains bullet point: "${rawName}"`);
         return { name: 'Unknown', location: '' };
     }
-    
+
     // Step 2: Split by bullet to isolate the company part
     // This often contains generic industry categorization
     let namePart = cleanSpecialCharacters(rawName.split('•')[0].trim());
-    
+
     // Step 2.5: Look for words that are run together based on case changes
     // Example: "HourWashington" should become "Hour Washington"
-    
+
     // First check for cities that are run together with previous words
     // We'll check for all cities in our commonLocations list
     for (const location of commonLocations) {
@@ -428,13 +449,13 @@ export function parseCompanyAndLocation(rawName) {
             }
         }
     }
-    
-    // Look for common word endings followed by capitalized location names, 
-    // but don't apply to "Barbecue" or restaurant names with locations like "- Miami" 
+
+    // Look for common word endings followed by capitalized location names,
+    // but don't apply to "Barbecue" or restaurant names with locations like "- Miami"
     // Check for these exceptions first
     if (!namePart.includes('Barbecue') && !namePart.includes(' - ')) {
         const wordBoundaryPattern = /(\b(?:hour|room|cafe|bar|club|bistro|grill|tap|lounge|den|pub|inn|shop|house|bakery))([A-Z][a-z]+)/i;
-        
+
         // Check for other common word boundaries
         const wordBoundaryMatch = namePart.match(wordBoundaryPattern);
         if (wordBoundaryMatch) {
@@ -443,13 +464,13 @@ export function parseCompanyAndLocation(rawName) {
             log.info(`Fixed missing space between words: "${namePart}"`);
         }
     }
-    
+
     // Step 3: Special handling for known edge cases and patterns
     let extractedFromKeywords = false;
-    
+
     // SPECIAL CHECK FOR ALL CAPS RESTAURANT GROUP PATTERNS
     // This handles "MARCUS SAMUELSSON RESTAURANT GROUP" type patterns first
-    if (/^[A-Z\s.'&]+\s+RESTAURANT\s+GROUP$/i.test(namePart) || 
+    if (/^[A-Z\s.'&]+\s+RESTAURANT\s+GROUP$/i.test(namePart) ||
         /^[A-Z\s.'&]+\s+HOSPITALITY\s+GROUP$/i.test(namePart) ||
         /^[A-Z\s.'&]+\s+FINE\s+DINING$/i.test(namePart) ||
         /^[A-Z\s.'&]+\s+CULINARY\s+GROUP$/i.test(namePart)) {
@@ -458,7 +479,7 @@ export function parseCompanyAndLocation(rawName) {
         extractedFromKeywords = true;
         // Skip further processing to ensure this name is kept intact
     }
-    
+
     // Special case for company names ending with common terms that would otherwise be excluded
     // This ensures we keep "MARCUS SAMUELSSON RESTAURANT GROUP" and "Blue Hill Fine Dining"
     if (!extractedFromKeywords) {
@@ -471,7 +492,7 @@ export function parseCompanyAndLocation(rawName) {
             /^(.+\s+)restaurant\s+management$/i,
             /^(.+\s+)hospitality\s+management$/i
         ];
-        
+
         // Check if the name matches any of these patterns
         for (const pattern of excludedEndingPatterns) {
             if (pattern.test(namePart)) {
@@ -484,7 +505,7 @@ export function parseCompanyAndLocation(rawName) {
             }
         }
     }
-    
+
     // Special case for GroupNYC and similar patterns
     if (!extractedFromKeywords && namePart.match(/Group\s*NYC\b/i)) {
         namePart = "Group NYC Hospitality";
@@ -504,15 +525,15 @@ export function parseCompanyAndLocation(rawName) {
                 // But first check if this is a full restaurant name (don't extract just the generic part)
                 const beforeKeyword = namePart.substring(0, index).trim();
                 if (beforeKeyword.split(/\s+/).length >= 2) {
-                    // If there are at least 2 words before the keyword, 
+                    // If there are at least 2 words before the keyword,
                     // like "Marcus Samuelsson" in "Marcus Samuelsson Restaurant Group",
                     // then keep the full name, don't extract just "Restaurant Group"
                     continue;
                 }
-                
+
                 const startIndex = index;
                 let endIndex = namePart.length;
-                
+
                 // Look for location markers to determine where the company name ends
                 for (const location of commonLocations) {
                     const locationIndex = namePart.indexOf(location, startIndex);
@@ -521,33 +542,33 @@ export function parseCompanyAndLocation(rawName) {
                         break;
                     }
                 }
-                
+
                 // Extract the potential company name
                 const potentialCompany = namePart.substring(startIndex, endIndex).trim();
-                
+
                 // Check if it's a generic term on its own or very close to it
-                // We'll consider it too generic if it's exactly a generic term OR 
+                // We'll consider it too generic if it's exactly a generic term OR
                 // if it's a generic term with just one or two extra words
                 const potentialLower = potentialCompany.toLowerCase();
-                const isExactGenericTerm = genericTerms.includes(potentialLower) || 
+                const isExactGenericTerm = genericTerms.includes(potentialLower) ||
                                           potentialLower === 'restaurant group' ||
                                           potentialLower === 'fine dining';
-                                          
+
                 // Count words - if it's a generic term plus just 1 word, it might still be too generic
                 const wordCount = potentialCompany.split(/\s+/).filter(w => w.length > 1).length;
-                const isGenericPlusOneWord = wordCount <= 3 && 
-                    (potentialLower.endsWith(' restaurant group') || 
+                const isGenericPlusOneWord = wordCount <= 3 &&
+                    (potentialLower.endsWith(' restaurant group') ||
                     potentialLower.endsWith(' fine dining') ||
                     potentialLower.endsWith(' hospitality group') ||
                     potentialLower.endsWith(' restaurant') ||
                     potentialLower.endsWith(' hospitality'));
-                
+
                 if (isExactGenericTerm || isGenericPlusOneWord) {
                     // Skip if it's just a generic term or too close to one
                     log.info(`Would extract generic-like term "${potentialCompany}" - skipping`);
                     continue;
                 }
-                
+
                 // If it's substantial (not just the keyword itself), use it
                 if (potentialCompany.length > keyword.length + 2) {
                     log.info(`Extracted restaurant name using keyword "${keyword}": "${potentialCompany}"`);
@@ -558,37 +579,37 @@ export function parseCompanyAndLocation(rawName) {
             }
         }
     }
-    
+
     // Step 4: Handle missing spaces before location identifiers (if we haven't found a better match yet)
     // This helps with cases like "Seaport Entertainment GroupNew York, NY"
     if (!extractedFromKeywords) {
         let locationFound = false;
-        
+
         // Sort locations by length (descending) to match longest locations first
         // This helps avoid partial matches like "NY" in "Georges"
         const sortedLocations = [...commonLocations].sort((a, b) => b.length - a.length);
-        
+
         for (const location of sortedLocations) {
             // Skip very short location names (2 chars) for this pattern match to avoid false positives
             // These will be handled by comma separation instead
             if (location.length <= 2) continue;
-            
+
             // Create a regex that looks for a lowercase or uppercase letter followed immediately by the location
             // This suggests a missing space between company name and location
             const locationRegex = new RegExp(`([a-zA-Z])(${location}\\b)`, 'i');
             const match = namePart.match(locationRegex);
-            
+
             if (match) {
                 // We found a missing space before a known location
                 const locationStart = match.index + 1; // +1 because of the capturing group
-                
+
                 // Check if we're in the middle of a word - avoid splitting "Georges" just because it has "GE"
                 const prevChar = namePart.charAt(match.index);
                 const nextCharAfterMatch = namePart.charAt(match.index + match[0].length);
-                
+
                 // Only split if it's at a word boundary or end of string
                 const isWordBoundary = nextCharAfterMatch === '' || /\s|,|\./.test(nextCharAfterMatch);
-                
+
                 if (isWordBoundary) {
                     namePart = namePart.substring(0, locationStart).trim();
                     log.info(`Fixed missing space before location: "${namePart}"`);
@@ -597,7 +618,7 @@ export function parseCompanyAndLocation(rawName) {
                 }
             }
         }
-        
+
         // Step 5: Handle comma-separated parts (typically location markers)
         // In format "Company Name, Location"
         if (!locationFound) {
@@ -605,7 +626,7 @@ export function parseCompanyAndLocation(rawName) {
             if (commaIndex !== -1) {
                 // Check if there are multiple commas (like "Company Name, Location, State")
                 const firstPart = namePart.substring(0, commaIndex).trim();
-                
+
                 // If the part before the comma contains another comma, we might have "Name, Location, State"
                 // In this case, we want to get the name part only
                 const earlierCommaIndex = firstPart.lastIndexOf(',');
@@ -619,14 +640,14 @@ export function parseCompanyAndLocation(rawName) {
             }
         }
     }
-    
+
     // Step 6: Fix any camelCase issues in the name
     // This handles cases where words are run together like "GroupNew"
     // Special handling for "NYC" and "SoHo" which should not be split
     if (!namePart.includes("NYC") && !namePart.includes("SoHo")) {
         namePart = namePart.replace(/([a-z])([A-Z])/g, '$1 $2');
     }
-    
+
     // Step 7: Try to identify and extract the most likely company name portion
     // Look for common patterns in the remaining string
     if (!extractedFromKeywords && namePart.includes(' by ')) {
@@ -637,14 +658,14 @@ export function parseCompanyAndLocation(rawName) {
             log.info(`Extracted company using 'by' indicator: "${namePart}"`);
         }
     }
-    
+
     // Step 8: Clean up business entity suffixes
     // But PRESERVE important terms like "Group" in company names
     const originalName = namePart;
     namePart = namePart
         .replace(/\s+(LLC|Inc|Corporation|Corp|Co\.|Co)\.?$/i, '')
         .trim();
-    
+
     // Only remove trailing generic terms if they're not part of a multi-word company name
     // This preserves "Hospitality Group" or "Restaurant Group" in proper names
     if (!/(square|food|hospitality|culinary|entertainment)\s+group$/i.test(namePart)) {
@@ -652,7 +673,7 @@ export function parseCompanyAndLocation(rawName) {
             .replace(/\s+(restaurant|bar|café|cafe|grill|bistro|tavern|kitchen)$/i, '')
             .trim();
     }
-    
+
     // Step 9: Remove any job title prefixes that might remain
     // Common job title patterns at the beginning
     const jobTitlePrefixes = [
@@ -661,7 +682,7 @@ export function parseCompanyAndLocation(rawName) {
         'server', 'bartender', 'host', 'hostess', 'cook', 'line cook',
         'a.m.', 'p.m.', 'morning', 'evening', 'night', 'day', 'weekend'
     ];
-    
+
     for (const prefix of jobTitlePrefixes) {
         if (namePart.toLowerCase().startsWith(prefix.toLowerCase() + ' ')) {
             // Remove just this prefix
@@ -670,62 +691,62 @@ export function parseCompanyAndLocation(rawName) {
             break;
         }
     }
-    
+
     // Step 10: Check if what's left is just a generic term or a location name
     // If it is, mark it as unknown since it's not a specific company name
     const lowerNamePart = namePart.toLowerCase();
-    
+
     // Check for generic terms - these are rejected regardless of context
     if (genericTerms.some(term => lowerNamePart === term.toLowerCase())) {
         log.info(`Generic term detected, not a company name: "${namePart}"`);
         return { name: 'Unknown', location: '' };
     }
-    
+
     // For these terms, only reject if they're standalone (not part of a larger name)
     // This way "Bobby's Restaurant" is valid, but just "Restaurant" is not
     const wordCount = namePart.split(/\s+/).filter(w => w.length > 0).length;
     if (wordCount === 1 && lowerNamePart.length > 2) {
-        if (['restaurant', 'hospitality', 'bar', 'cafe', 'bistro', 'tavern', 
+        if (['restaurant', 'hospitality', 'bar', 'cafe', 'bistro', 'tavern',
              'eatery', 'catering', 'culinary', 'bakery', 'dining'].includes(lowerNamePart)) {
             log.info(`Standalone industry term detected, not a company name: "${namePart}"`);
             return { name: 'Unknown', location: '' };
         }
     }
-    
+
     // Check if it's just a location name
     if (commonLocations.some(loc => lowerNamePart === loc.toLowerCase())) {
         log.info(`Location name detected, not a company name: "${namePart}"`);
         return { name: 'Unknown', location: '' };
     }
-    
+
     // Check if it STARTS with a location name (may indicate just a location description)
     // But we need to be careful not to filter out legitimate company names that include locations
     // like "Brooklyn Brewery" or "New York Culinary Group"
-    
+
     // If it's ONLY a location name, it's not a company
     if (commonLocations.some(loc => lowerNamePart === loc.toLowerCase())) {
         log.info(`Is exactly a location name, not a company name: "${namePart}"`);
         return { name: 'Unknown', location: '' };
     }
-    
+
     // If it starts with a location but also includes these terms, it's likely a valid company name
     const validLocationPrefixTerms = ['brewery', 'culinary', 'dining', 'restaurants', 'kitchen', 'tavern', 'bistro'];
     const containsValidTerm = validLocationPrefixTerms.some(term => lowerNamePart.includes(term.toLowerCase()));
-    
+
     // Only reject if it starts with a location, doesn't have valid terms, and is relatively short
-    if (namePart.length < 20 && 
+    if (namePart.length < 20 &&
         !containsValidTerm &&
         commonLocations.some(loc => lowerNamePart.startsWith(loc.toLowerCase() + ' '))) {
         log.info(`Appears to start with location without valid company indicators: "${namePart}"`);
         return { name: 'Unknown', location: '' };
     }
-    
+
     // Check for very short names or just initials (likely fragments)
     if (namePart.length < 3 || (namePart.length <= 5 && namePart.split(' ').every(part => part.length === 1))) {
         log.info(`Name too short or just initials, likely a fragment: "${namePart}"`);
         return { name: 'Unknown', location: '' };
     }
-    
+
     // Final return with clean company name
     log.info(`Final parsed company name: "${namePart}"`);
     return {
@@ -741,7 +762,7 @@ async function loadCache() {
         companyCache.clear();
         return;
     }
-    
+
     try {
         log.info('Loading cache from default KeyValueStore...');
         const store = await KeyValueStore.open();
@@ -751,17 +772,17 @@ async function loadCache() {
             log.info('No cache data found, starting with empty cache.');
             return;
         }
-        
+
         let loadedCount = 0;
         let staleCount = 0;
         let emptyEmailsCount = 0;
         let malformedCount = 0;
         let skippedDuplicates = 0;
         let forcedFreshCount = 0;
-        
+
         // Track which companies we're loading to avoid duplicate variations
         const loadedCompanies = new Set();
-        
+
         Object.entries(data).forEach(([key, value]) => {
             // Basic validation
             if (!value || typeof value !== 'object' || !value.timestamp) {
@@ -769,28 +790,28 @@ async function loadCache() {
                 malformedCount++;
                 return;
             }
-            
+
             // Check if stale
             if (isStale(value.timestamp)) {
                 log.info(`Skipping stale cache entry: ${key}`);
                 staleCount++;
                 return;
             }
-            
+
             // Validate emails array
             if (!value.emails || !Array.isArray(value.emails)) {
                 log.info(`Skipping malformed cache entry (invalid emails array): ${key}`);
                 malformedCount++;
                 return;
             }
-            
+
             // Skip empty emails
             if (value.emails.length === 0) {
                 log.info(`Skipping cache entry with empty emails: ${key}`);
                 emptyEmailsCount++;
                 return;
             }
-            
+
             // Validate each email object
             let hasMalformedEmail = false;
             for (const email of value.emails) {
@@ -799,25 +820,25 @@ async function loadCache() {
                     break;
                 }
             }
-            
+
             if (hasMalformedEmail) {
                 log.info(`Skipping cache entry with malformed email objects: ${key}`);
                 malformedCount++;
                 return;
             }
-            
+
             // Check for forced fresh company
             if (FORCE_FRESH_COMPANIES.has(key.toLowerCase())) {
                 log.info(`Skipping force-fresh company: ${key}`);
                 forcedFreshCount++;
                 return;
             }
-            
+
             // Add original company info if missing
             if (!value.originalCompany) {
                 value.originalCompany = key.split(':')[0]; // Extract company from key
             }
-            
+
             // Check for company variations to avoid loading duplicate data
             const companyPart = key.split(':')[0].toLowerCase();
             if (loadedCompanies.has(companyPart)) {
@@ -825,13 +846,13 @@ async function loadCache() {
                 skippedDuplicates++;
                 return;
             }
-            
+
             // All checks passed, add to cache
             companyCache.set(key, value);
             loadedCompanies.add(companyPart);
             loadedCount++;
         });
-        
+
         log.info(`Loaded ${loadedCount} fresh cache entries, skipped ${staleCount} stale, ${emptyEmailsCount} empty, ${malformedCount} malformed, ${skippedDuplicates} duplicates, ${forcedFreshCount} forced fresh.`);
         log.info(`Cache keys: ${Array.from(companyCache.keys()).join(', ')}`);
     } catch (error) {
@@ -842,15 +863,15 @@ async function loadCache() {
 async function clearCache() {
     try {
         log.info('Clearing company cache...');
-        
+
         // Clear in-memory cache
         companyCache.clear();
-        
+
         // Clear persisted cache
         const store = await KeyValueStore.open();
         log.info(`Clearing cache from KeyValueStore ID: ${store.id}`);
         await store.setValue('company-cache-data', null);
-        
+
         log.info('Cache has been cleared successfully');
         return true;
     } catch (error) {
@@ -865,21 +886,21 @@ async function saveCache() {
         log.info('⚠️ CACHE DISABLED: Skipping cache saving');
         return;
     }
-    
+
     try {
         log.info(`Saving ${companyCache.size} cache entries to default KeyValueStore...`);
-        
+
         // Convert to object for storage
         const cacheObject = {};
         let entriesWithEmails = 0;
         let entriesPerSource = {};
-        
+
         companyCache.forEach((value, key) => {
             // Validate before saving
             if (value && value.emails && Array.isArray(value.emails) && value.emails.length > 0) {
                 cacheObject[key] = value;
                 entriesWithEmails++;
-                
+
                 // Track counts by source
                 const source = value.source || 'unknown';
                 entriesPerSource[source] = (entriesPerSource[source] || 0) + 1;
@@ -887,11 +908,11 @@ async function saveCache() {
                 log.info(`Not saving invalid cache entry: ${key}`);
             }
         });
-        
+
         const store = await KeyValueStore.open();
         log.info(`Saving to KeyValueStore ID: ${store.id}`);
         await store.setValue('company-cache-data', cacheObject);
-        
+
         // Log stats about what was saved
         log.info(`Cache saved successfully: ${entriesWithEmails} entries with emails out of ${companyCache.size} total entries`);
         log.info(`Entries by source: ${JSON.stringify(entriesPerSource)}`);
@@ -909,10 +930,10 @@ function hasNonUSTld(email) {
     if (!email || typeof email !== 'string') {
         return false; // If no email provided, don't filter
     }
-    
+
     // Convert email to lowercase for case-insensitive matching
     const lowerEmail = email.toLowerCase();
-    
+
     // Check if the email ends with any of the country-specific TLDs
     return COUNTRY_TLDS.some(tld => {
         return lowerEmail.endsWith(tld);
@@ -928,7 +949,7 @@ function filterNonUSEmails(emails) {
     if (!emails || !Array.isArray(emails)) {
         return [];
     }
-    
+
     // Return all emails without filtering
     log.info(`[TLD Filter] Keeping all ${emails.length} emails regardless of domain`);
     return emails;
@@ -943,9 +964,9 @@ function isGenericEmail(email) {
     if (!email || typeof email !== 'string') {
         return true; // Consider empty emails as generic
     }
-    
+
     const lowerEmail = email.toLowerCase();
-    
+
     // Check if it matches any generic patterns
     return GENERIC_EMAIL_PATTERNS.some(pattern => lowerEmail.includes(pattern));
 }
@@ -959,38 +980,38 @@ function calculateEmailScore(email) {
     if (!email || !email.value) {
         return 1000; // Very low score for invalid emails
     }
-    
+
     let score = 500; // Base score
-    
+
     // Process job title if available (highest priority factor)
     const title = email.position || email.position_raw || '';
     if (title && title.trim()) {
         score = getTitlePriority(title);
         return score; // Return early if we have a title match
     }
-    
+
     // No title available, use other factors
-    
+
     // Prefer personal emails over generic ones
     if (isGenericEmail(email.value)) {
         score += 200;
     } else {
         score -= 100;
     }
-    
+
     // Prefer emails with names over unnamed contacts
     if (email.first_name || email.last_name) {
         score -= 50;
     } else {
         score += 50;
     }
-    
+
     // Use confidence if available
     if (typeof email.confidence === 'number') {
         // Higher confidence = lower score (better)
         score -= (email.confidence / 2);
     }
-    
+
     // Prefer higher quality types
     if (email.type) {
         if (email.type === 'personal') {
@@ -999,7 +1020,7 @@ function calculateEmailScore(email) {
             score += 25;
         }
     }
-    
+
     return score;
 }
 
@@ -1013,11 +1034,11 @@ function processEmails(emailsData) {
         log.info('No email data to process');
         return [];
     }
-    
+
     try {
         // Handle both array input (from older code) and object input (API response)
         let emails = [];
-        
+
         // Check if we're dealing with an Array (direct emails) or Object (full API response)
         if (Array.isArray(emailsData)) {
             log.info(`Processing ${emailsData.length} emails (array format)`);
@@ -1029,44 +1050,44 @@ function processEmails(emailsData) {
             log.info('Invalid email data format');
             return [];
         }
-        
+
         if (emails.length === 0) {
             return [];
         }
-        
+
         // Filter out non-US emails (optional, enable or disable as needed)
         const enableTldFiltering = true; // Set to false to disable TLD filtering
-        
+
         let processedEmails = emails;
         if (enableTldFiltering) {
             // Keep track of original count
             const originalCount = emails.length;
-            
+
             // Filter out emails with non-US TLDs
             processedEmails = filterNonUSEmails(emails);
-            
+
             // Record filtered emails
             const filteredCount = originalCount - processedEmails.length;
-            
+
             // Log TLD filtering information
             if (filteredCount > 0) {
                 const domain = emailsData.data ? emailsData.data.domain || 'unknown' : 'unknown';
                 log.info(`[TLD Filter] Domain: ${domain} | Filtered out ${filteredCount}/${originalCount} non-US emails`);
             }
-            
+
             // Use original list if filtering removed all emails
             if (processedEmails.length === 0 && originalCount > 0) {
                 log.info(`[TLD Filter] All emails were filtered out, using unfiltered list`);
                 processedEmails = emails;
             }
         }
-        
+
         // Log the emails we're processing
         log.info(`Processing ${processedEmails.length} email contacts`);
         if (processedEmails.length > 0) {
             log.info(`Sample email structure: ${JSON.stringify(processedEmails[0])}`);
         }
-        
+
         // Enhanced email handling - don't filter out by email.value as this can remove valid emails
         // Use map directly to normalize the data structure
         const scoredEmails = processedEmails.map(email => {
@@ -1076,18 +1097,18 @@ function processEmails(emailsData) {
             const lastName = email.last_name || '';
             const position = email.position || email.position_raw || '';
             const confidence = email.confidence || 0;
-            
+
             // Skip invalid emails during mapping
             if (!emailValue) {
                 log.debug(`Skipping email without address: ${JSON.stringify(email)}`);
                 return null;
             }
-            
+
             const score = calculateEmailScore(email);
-            
-            return { 
-                name: (firstName && lastName) ? 
-                    `${firstName} ${lastName}`.trim() : 
+
+            return {
+                name: (firstName && lastName) ?
+                    `${firstName} ${lastName}`.trim() :
                     (firstName || lastName || 'Unknown'),
                 title: position || 'N/A',
                 email: emailValue,
@@ -1095,26 +1116,26 @@ function processEmails(emailsData) {
                 priority: score  // Store score for debugging and sorting
             };
         });
-        
+
         // Filter out null entries (emails without addresses) and sort by score (lower is better)
         const validEmails = scoredEmails.filter(email => email !== null);
-        
+
         if (validEmails.length === 0) {
             log.info('No valid emails found after processing');
             return [];
         }
-        
+
         // Sort by score (lower is better)
         const sortedEmails = validEmails.sort((a, b) => a.priority - b.priority);
-        
+
         // Log sorted results for debugging
         log.info(`Email priority sorting results:`);
         sortedEmails.slice(0, 5).forEach((email, index) => {
-            const matchedTerm = email.priority < TITLE_PRIORITY.length ? 
+            const matchedTerm = email.priority < TITLE_PRIORITY.length ?
                 TITLE_PRIORITY[email.priority] : 'No match';
             log.info(`  ${index+1}. ${email.name}, ${email.title} - Priority: ${email.priority} (${matchedTerm})`);
         });
-        
+
         return sortedEmails;
     } catch (error) {
         log.error(`Error processing emails: ${error.message}`);
@@ -1122,265 +1143,161 @@ function processEmails(emailsData) {
     }
 }
 
-async function getCompanyInfoWithSource(companyName, locationName = '', source = 'company') {
-    if (!companyName || companyName === 'Unknown' || companyName.startsWith('Excluded:')) {
-        log.info(`Skipping ${source} search for ${companyName || 'unknown'} name`);
-        return { linkedin: 'N/A', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source };
+/**
+ * Fetches company info from Hunter.io, potentially using a domain instead of company name.
+ */
+async function getCompanyInfoWithSource(searchTerm, searchType = 'company', source = 'unknown') {
+    // Check if searchTerm is valid based on searchType
+    if (!searchTerm || searchTerm === 'Unknown' || searchTerm.startsWith('Excluded:')) {
+        log.info(`Skipping Hunter search for invalid/excluded ${searchType}: ${searchTerm || 'unknown'}`);
+        return { linkedin: 'N/A', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: `${source}_skipped` };
     }
-    
-    // Warn if location is provided - we should avoid using locations in email searches
-    if (locationName && locationName.trim() !== '') {
-        log.info(`WARNING: Location "${locationName}" was provided to getCompanyInfoWithSource for "${companyName}". Location should NOT be used for email searches to avoid incorrect TLD matches.`);
-    }
-    
-    // Clean special characters from company name
-    const withoutSpecialChars = cleanSpecialCharacters(companyName);
-    // Preserve capitalization for company names like "STARR Restaurants"
-    // REMOVED call to cleanCompanyName to avoid stripping significant words like "Group"
-    const cleanedName = withoutSpecialChars; 
-    
-    // Log both original and cleaned versions
-    log.info(`${source} name: "${companyName}" cleaned to "${cleanedName}"`);
-    
-    // For comparison purposes, use lowercase but preserve spaces
-    const lowerCleanedName = cleanedName.toLowerCase();
-    
-    // Create a variant with spaces removed only for exclusion list checks
-    // We don't use this normalized version for actual API searches
-    const normalizedName = lowerCleanedName.replace(/\s+/g, '');
-    if (normalizedName !== lowerCleanedName.replace(/\s+/g, '')) {
-        log.info(`Normalized version (for exclusion checks only): "${normalizedName}"`);
-    }
-    
-    // Check for exact match in exclusion list (with and without spaces)
-    if (EXCLUDED_COMPANIES.has(lowerCleanedName) || 
-        Array.from(EXCLUDED_COMPANIES).some(excluded => normalizedName.includes(excluded.replace(/\s+/g, '')))) {
-        log.info(`Skipping exactly excluded ${source}: "${companyName}" (normalized: "${normalizedName}")`);
-        return { linkedin: 'Excluded', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source };
-    }
-    
-    // Check for partial matches with normalized spaces (like "WholeFoodsMarket" containing "wholefoods")
-    for (const partialTerm of PARTIAL_EXCLUSIONS) {
-        const normalizedTerm = partialTerm.replace(/\s+/g, '');
-        // Check both regular and normalized versions
-        if (lowerCleanedName.includes(partialTerm) || normalizedName.includes(normalizedTerm)) {
-            log.info(`Skipping partially excluded ${source}: "${companyName}" (contains "${partialTerm}", normalized: "${normalizedTerm}")`);
-            return { linkedin: 'Excluded', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source };
+
+    // Basic exclusion check (can be enhanced later)
+    if (searchType === 'company') {
+        const lowerCleanedName = cleanSpecialCharacters(searchTerm).toLowerCase();
+        const normalizedName = lowerCleanedName.replace(/\s+/g, '');
+        if (EXCLUDED_COMPANIES.has(lowerCleanedName) ||
+            Array.from(EXCLUDED_COMPANIES).some(excluded => normalizedName.includes(excluded.replace(/\s+/g, '')))) {
+            log.info(`Skipping exactly excluded company: "${searchTerm}"`);
+            return { linkedin: 'Excluded', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: `${source}_excluded` };
         }
-    }
-    const shouldForceRefresh = FORCE_FRESH_COMPANIES.has(lowerCleanedName);
-    // Make the cache key unique by including the full company name, not just the cleaned name
-    const cacheKey = `${companyName.toLowerCase()}:${source}`;
-    
-    // Also check if we should refresh the original cleaned name key
-    if (shouldForceRefresh) {
-        if (companyCache.has(cacheKey)) {
-            companyCache.delete(cacheKey);
-        }
-        // Also delete any keys that might have this company as part of their key
-        for (const key of companyCache.keys()) {
-            if (key.toLowerCase().includes(lowerCleanedName)) {
-                log.info(`Force refreshing related cache key: "${key}"`);
-                companyCache.delete(key);
+        for (const partialTerm of PARTIAL_EXCLUSIONS) {
+            const normalizedTerm = partialTerm.replace(/\s+/g, '');
+            if (lowerCleanedName.includes(partialTerm) || normalizedName.includes(normalizedTerm)) {
+                log.info(`Skipping partially excluded company: "${searchTerm}" (contains "${partialTerm}")`);
+                return { linkedin: 'Excluded', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: `${source}_excluded` };
             }
         }
     }
-    
-    // Check cache with the more precise key - unless cache is disabled
-    const useCaching = !DISABLE_COMPANY_CACHE && !shouldForceRefresh;
-    
-    if (useCaching && companyCache.has(cacheKey)) {
-        const cachedData = companyCache.get(cacheKey);
-        if (cachedData.emails && Array.isArray(cachedData.emails) && cachedData.emails.length > 0) {
-            log.info(`Cache hit for exact key "${cacheKey}"`);
-            
-            // Add info about cache contents for debugging
-            const emailDebug = cachedData.emails.map((e, i) => 
-                `${i+1}. ${e.name || 'Unknown'}: ${e.email || 'N/A'} (${e.title || 'N/A'})`).join(', ');
-            log.info(`CACHE DEBUG: ${cacheKey} contains emails: ${emailDebug}`);
-            
-            return cachedData;
-        }
-        companyCache.delete(cacheKey);
-    }
-    
+    // Note: Cache logic removed as DISABLE_COMPANY_CACHE is true
     if (DISABLE_COMPANY_CACHE) {
-        log.info(`Cache is disabled - making fresh API call for "${companyName}"`);
+        log.info(`Cache is disabled - making fresh Hunter API call for ${searchType}: "${searchTerm}"`);
     }
+
     try {
-        log.info(`Fetching ${source} data for "${companyName}"...`);
-        await delay(1000);
-        
-        // Ensure we're only using the company name for searches - NEVER include location information
-        // This prevents incorrect TLD matches (e.g., searching for "Brooklyn" and getting brooklyn.be emails)
-        
-        // Use the properly cleaned company name but preserve capitalization
-        // This helps with capitalized names like "STARR Restaurants"
-        const cleanCompanyForSearch = cleanedName.trim();
-        const apiUrl = `${DOMAIN_SEARCH_API_URL}?company=${encodeURIComponent(cleanCompanyForSearch)}&limit=10&api_key=${HUNTER_API_KEY}`;
-        log.info(`API request URL (${source}): ${apiUrl}`);
+        log.info(`Fetching Hunter data via ${searchType} for "${searchTerm}"...`);
+        await delay(1000); // Keep a small delay
+
+        let apiUrl = '';
+        let searchParam = '';
+
+        if (searchType === 'domain') {
+            // Use Domain Search endpoint for domain search, passing domain in query
+            apiUrl = `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(searchTerm)}&limit=50&api_key=${HUNTER_API_KEY}`; // Use limit 50 for domain
+            searchParam = searchTerm; // domain is the search term
+        } else { // Default to 'company' search
+            // Use Domain Search endpoint for company search
+            const cleanCompanyForSearch = cleanSpecialCharacters(searchTerm).trim(); // Clean company name
+            apiUrl = `https://api.hunter.io/v2/domain-search?company=${encodeURIComponent(cleanCompanyForSearch)}&limit=10&api_key=${HUNTER_API_KEY}`;
+            searchParam = cleanCompanyForSearch;
+        }
+
+        log.info(`Hunter API request URL (${source}, type: ${searchType}): ${apiUrl}`);
+
         const response = await Promise.race([
             fetch(apiUrl, { method: 'GET', headers: { 'Content-Type': 'application/json' } }),
             timeout(API_TIMEOUT_MS),
         ]);
+
         if (!response.ok) {
             const errorText = await response.text();
-            log.error(`Hunter API error for "${companyName}" (${source}): ${response.status} - ${errorText}`);
+            log.error(`Hunter API error for ${searchType} "${searchParam}" (${source}): ${response.status} - ${errorText}`);
             if (response.status === 429) {
                 await delay(10000);
             }
-            throw new Error(`Hunter API returned error ${response.status}: ${errorText}`);
+            // Return error state instead of throwing to allow merging later
+            return { linkedin: 'Error', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: `${source}_error_${response.status}` };
         }
+
         const data = await response.json();
         if (!data || !data.data) {
-            throw new Error('Invalid API response: missing data object');
+             log.error(`Hunter API invalid response for ${searchType} "${searchParam}" (${source}): missing data object. Response: ${JSON.stringify(data)}`);
+            return { linkedin: 'Error', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: `${source}_error_invalid_response` };
         }
-        
-        log.info(`[Hunter Response] Successfully parsed JSON for ${companyName} (${source})`);
-        
-        if (!data || !data.data) {
-            log.error(`[Hunter Response Error] Invalid API response for ${companyName} (${source}): missing data object. Response: ${JSON.stringify(data)}`);
-            throw new Error('Invalid API response: missing data object');
-        }
-        
-        // Check if there are search results we can use
-        if (data.data.results && Array.isArray(data.data.results) && data.data.results.length > 0) {
-            log.info(`Hunter API returned ${data.data.results.length} potential companies for "${companyName}"`);
-            
-            // Log all results for debugging - safely check properties
-            data.data.results.forEach((result, index) => {
-                const hasEmails = result && result.emails && Array.isArray(result.emails);
-                const emailCount = hasEmails ? result.emails.length : 0;
-                const company = result && result.company ? result.company : 'Unknown';
-                const domain = result && result.domain ? result.domain : 'N/A';
-                
-                log.info(`Result #${index+1}: "${company}" - Domain: ${domain}, Emails: ${emailCount}`);
-            });
-            
-            // Find the first result with emails - with defensive checks
+
+        log.info(`[Hunter Response] Successfully parsed JSON for ${searchType} "${searchParam}" (${source})`);
+
+        // --- Process results based on endpoint used ---
+        let emailsToProcess = [];
+        let resultDomain = data.data.domain || (searchType === 'domain' ? searchTerm : 'N/A');
+        let resultLinkedin = data.data.linkedin || 'N/A';
+        let resultSize = data.data.headcount || 'N/A';
+        let resultCompany = data.data.organization || (searchType === 'company' ? searchParam : 'Unknown');
+
+        if (searchType === 'company' && data.data.results && data.data.results.length > 0) {
+             // Handle multiple results from domain-search (prefer first one with emails)
+             log.info(`Hunter API returned ${data.data.results.length} potential companies for "${searchParam}"`);
             let bestResultIndex = -1;
             for (let i = 0; i < data.data.results.length; i++) {
-                const result = data.data.results[i];
-                if (result && result.emails && Array.isArray(result.emails) && result.emails.length > 0) {
+                if (data.data.results[i]?.emails?.length > 0) {
                     bestResultIndex = i;
                     break;
                 }
             }
-            
-            // If found a result with emails, use it
             if (bestResultIndex >= 0) {
                 const bestResult = data.data.results[bestResultIndex];
-                const hasEmails = bestResult && bestResult.emails && Array.isArray(bestResult.emails);
-                const emailCount = hasEmails ? bestResult.emails.length : 0;
-                
-                log.info(`Selected result #${bestResultIndex+1} "${bestResult.company || 'Unknown'}" with ${emailCount} emails`);
-                
-                // IMPORTANT: Add company information to EACH email object BEFORE processing
-                // This ensures the original company stays with each contact
-                if (hasEmails) {
-                    // Add company information to each email object before processing
-                    bestResult.emails = bestResult.emails.map(email => ({
-                        ...email,
-                        _originalCompany: bestResult.company || companyName,
-                        _originalDomain: bestResult.domain,
-                        _sourceTime: Date.now()
-                    }));
-                    
-                    log.info(`Added company identification to ${bestResult.emails.length} emails for "${bestResult.company || companyName}"`);
-                }
-                
-                const processedEmails = hasEmails ? processEmails(bestResult.emails) : [];
-                
-                // Log all the processed emails we have for this company
-                if (processedEmails.length > 0) {
-                    log.info(`ALL processed emails for company "${bestResult.company || companyName}":`);
-                    processedEmails.forEach((email, idx) => {
-                        log.info(`  ${idx+1}. ${email.name}, ${email.title}, ${email.email} - Priority: ${email.priority} - Company: ${email._originalCompany || 'unknown'}`);
-                    });
-                }
-                
-                const result = {
-                    linkedin: bestResult.linkedin || 'N/A',
-                    domain: bestResult.domain || 'N/A',
-                    size: bestResult.employees_count || bestResult.headcount || 'N/A',
-                    emails: processedEmails, // Keep ALL emails, not just top 3
-                    timestamp: now(),
-                    source: `${source}_result_${bestResultIndex+1}`
-                };
-                return result;
+                log.info(`Selected company result #${bestResultIndex+1} "${bestResult.company || 'Unknown'}" with ${bestResult.emails.length} emails`);
+                emailsToProcess = bestResult.emails || [];
+                resultDomain = bestResult.domain || resultDomain;
+                resultLinkedin = bestResult.linkedin || resultLinkedin;
+                resultSize = bestResult.employees_count || bestResult.headcount || resultSize;
+                resultCompany = bestResult.company || resultCompany;
+                source = `${source}_company_result_${bestResultIndex+1}`;
             } else {
-                log.info(`No results with emails found among ${data.data.results.length} companies - using primary result`);
+                log.info(`No company results with emails found for "${searchParam}", using primary data if available.`);
+                emailsToProcess = data.data.emails || []; // Use primary emails if no result had emails
             }
+        } else if (data.data.emails && data.data.emails.length > 0) {
+             // Handles primary emails from domain-search OR emails from email-finder
+             emailsToProcess = data.data.emails;
         }
-        
-        // If no results array or no results with emails, use the primary data
-        const companyData = data.data;
-        // Add defensive checks for emails property
-        const hasEmails = companyData && companyData.emails && Array.isArray(companyData.emails);
-        
-        // IMPORTANT: Add company information to EACH email object BEFORE processing
-        // This ensures the original company stays with each contact
-        if (hasEmails) {
-            // Add company identification to each email before processing
-            companyData.emails = companyData.emails.map(email => ({
+
+        // IMPORTANT: Add original search info to each email object BEFORE processing
+        if (emailsToProcess.length > 0) {
+            emailsToProcess = emailsToProcess.map(email => ({
                 ...email,
-                _originalCompany: companyData.organization || companyName,
-                _originalDomain: companyData.domain,
+                _originalCompany: resultCompany, // Company name associated with this Hunter result
+                _originalDomain: resultDomain,
+                _sourceSearchTerm: searchTerm,
+                _sourceSearchType: searchType,
                 _sourceTime: Date.now()
             }));
-            
-            log.info(`Added company identification to ${companyData.emails.length} emails for "${companyData.organization || companyName}"`);
+            log.info(`Added identification to ${emailsToProcess.length} emails for "${resultCompany}" (from ${searchType}: "${searchTerm}")`);
         }
-        
-        const processedEmails = hasEmails ? processEmails(companyData.emails) : [];
-        
-        // Log all the processed emails we have for this company
+
+        const processedEmails = processEmails(emailsToProcess);
+
+        // Log processed emails
         if (processedEmails.length > 0) {
-            log.info(`ALL processed emails for company "${companyData.organization || companyName}":`);
+            log.info(`ALL processed emails for "${resultCompany}" (from ${searchType}: "${searchTerm}"):`);
             processedEmails.forEach((email, idx) => {
-                log.info(`  ${idx+1}. ${email.name}, ${email.title}, ${email.email} - Priority: ${email.priority} - Company: ${email._originalCompany || 'unknown'}`);
+                log.info(`  ${idx+1}. ${email.name}, ${email.title}, ${email.email} - Priority: ${email.priority}`);
             });
         }
-        
-        const result = {
-            linkedin: companyData.linkedin || 'N/A',
-            domain: companyData.domain || 'N/A',
-            size: companyData.headcount || 'N/A',
-            emails: processedEmails, // Keep ALL emails, not just top 3
+
+        const finalResult = {
+            linkedin: resultLinkedin,
+            domain: resultDomain,
+            size: resultSize,
+            emails: processedEmails,
             timestamp: now(),
-            source
+            source: source, // Use updated source if company result was chosen
+            originalCompany: resultCompany // Store the company name identified by Hunter
         };
-        const emailsLog = result.emails.length > 0 
-            ? result.emails.map(e => `${e.name}, ${e.title}, ${e.email}`).join('; ') 
+
+        const emailsLog = finalResult.emails.length > 0
+            ? finalResult.emails.map(e => `${e.name}, ${e.title}, ${e.email}`).join('; ')
             : 'None';
-        log.info(`Found data for "${companyName}" (${source}): LinkedIn=${result.linkedin}, Domain=${result.domain}, Emails=${emailsLog}`);
-        if (result.emails.length > 0) {
-            // Store information about which company generated these emails
-            result.originalCompany = companyName;
-            
-            // Only store in cache if caching is enabled
-            if (!DISABLE_COMPANY_CACHE) {
-                companyCache.set(cacheKey, result);
-                
-                // Debug: how many entries in the cache
-                log.info(`Cache now contains ${companyCache.size} entries. Recent key: ${cacheKey}`);
-                
-                // Save cache to storage
-                await saveCache();
-            } else {
-                log.info(`Cache disabled - not storing result for "${companyName}"`);
-            }
-        } else {
-            log.info(`Not caching result for "${companyName}" (${source}) due to empty emails list`);
-        }
-        return result;
+        log.info(`Found Hunter data for ${searchType} "${searchTerm}" (${source}): LinkedIn=${finalResult.linkedin}, Domain=${finalResult.domain}, Emails=${emailsLog}`);
+
+        // Cache logic removed
+
+        return finalResult;
+
     } catch (error) {
-        log.error(`Error fetching ${source} data for "${companyName}": ${error.message}`);
-        if (source === 'company' && locationName && locationName !== companyName) {
-            log.info(`No data for "${companyName}" (${source}), trying location "${locationName}"...`);
-            return await getCompanyInfoWithSource(locationName, '', 'location');
-        }
-        return { linkedin: 'Error', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source };
+        log.error(`Error fetching Hunter data for ${searchType} "${searchTerm}" (${source}): ${error.message}`);
+        return { linkedin: 'Error', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: `${source}_error_exception` };
     }
 }
 
@@ -1389,292 +1306,229 @@ function extractPotentialCompaniesFromAddress(address) {
     if (!address || typeof address !== 'string' || address === 'N/A') {
         return [];
     }
-    
+
     // Common address patterns to ignore
     const ignoredWords = new Set([
         'street', 'st', 'avenue', 'ave', 'road', 'rd', 'blvd', 'boulevard', 'drive', 'dr',
         'lane', 'ln', 'court', 'ct', 'place', 'pl', 'way', 'circle', 'cir', 'suite', 'ste',
         'floor', 'fl', 'unit', 'apt', 'apartment', '#'
     ]);
-    
+
     // Generic terms that should not be considered company names on their own
     const genericAddressTerms = [
-        'restaurant group', 'hospitality group', 'restaurant', 'hospitality', 
+        'restaurant group', 'hospitality group', 'restaurant', 'hospitality',
         'group', 'consulting', 'management', 'fine dining'
     ];
-    
+
     // Check if the address contains numbers that might be street addresses
     const hasStreetNumber = /\b\d+\b/.test(address);
-    
+
     // Split by common delimiters
     const parts = address.split(/[,|•|\/|-]+/).map(part => part.trim());
     const potentialCompanies = [];
-    
+
     for (const part of parts) {
         // Skip short parts and parts with just numbers
         if (part.length < 4 || /^\d+$/.test(part)) {
             continue;
         }
-        
+
         // Skip generic terms that aren't specific company names
         if (genericAddressTerms.some(term => part.toLowerCase() === term)) {
             continue;
         }
-        
+
         // Skip if part contains too many ignored words
         const words = part.toLowerCase().split(/\s+/);
         const ignoredCount = words.filter(word => ignoredWords.has(word)).length;
-        
+
         // Skip parts that look like street addresses
         if (hasStreetNumber && (ignoredCount > 0 || /\b\d+\b/.test(part))) {
             continue;
         }
-        
+
         // Looks like a city+state pattern
         if (/[A-Z]{2}$/.test(part) && part.length <= 12) {
             continue;
         }
-        
+
         // This part might be a company name
         potentialCompanies.push(part);
     }
-    
+
     return potentialCompanies;
 }
 
-async function getCompanyInfo(rawCompanyName, rawLocation = '') {
-    const { name: cleanedCompany } = parseCompanyAndLocation(rawCompanyName);
+/**
+ * Orchestrates fetching company info, prioritizing Google for URL then Hunter for domain.
+ */
+async function getCompanyInfo(rawCompanyName, rawLocation = '', parentCompanyName = null) {
+    const { name: primaryCompanyName } = parseCompanyAndLocation(rawCompanyName);
+    const { name: parsedParentCompany } = parentCompanyName ? parseCompanyAndLocation(parentCompanyName) : { name: null };
+
     let allResults = [];
-    
-    // ALWAYS try with main company name
-    log.info(`Searching Hunter API with primary company name: "${cleanedCompany}"`);
-    const companyInfo = await getCompanyInfoWithSource(cleanedCompany, rawLocation, 'company');
-    allResults.push({ source: 'primary', data: companyInfo });
-    log.info(`Found ${companyInfo.emails.length} emails with primary company name "${cleanedCompany}"`);
-    
-    // ALWAYS also try with the whole location string if it exists and is different
-    if (rawLocation && rawLocation !== cleanedCompany) {
-        // Clean special characters from the location string
-        const cleanedLocation = cleanSpecialCharacters(rawLocation);
-        
-        // Skip if the location is just "Restaurant Group" or another generic term
-        // Define common generic terms here to avoid scope issues
-        const commonGenericTerms = [
-            'restaurant group', 'hospitality group', 'restaurant', 'hospitality', 
-            'group', 'consulting', 'management'
-        ];
-        
-        if (commonGenericTerms.includes(cleanedLocation.toLowerCase()) || 
-            cleanedLocation.toLowerCase() === 'restaurant group') {
-            log.info(`Location "${cleanedLocation}" is a generic term - skipping API call`);
-            allResults.push({ 
-                source: 'location', 
-                data: { 
-                    linkedin: 'N/A', 
-                    domain: 'N/A', 
-                    size: 'N/A', 
-                    emails: [], 
-                    timestamp: now(), 
-                    source: 'generic_term_location' 
-                } 
-            });
-        } else {
-            // Check if the location contains any excluded company names before proceeding
-            const normalizedLocation = cleanedLocation.toLowerCase().replace(/\s+/g, '');
-            let isExcluded = false;
-            
-            // Check for partial matches first (e.g., "whole foods")
-            for (const partialTerm of PARTIAL_EXCLUSIONS) {
-                const normalizedTerm = partialTerm.replace(/\s+/g, '');
-                if (normalizedLocation.includes(normalizedTerm)) {
-                    log.info(`Location contains excluded company "${partialTerm}" - skipping API call`);
-                    isExcluded = true;
-                    allResults.push({ 
-                        source: 'location', 
-                        data: { 
-                            linkedin: 'Excluded', 
-                            domain: 'N/A', 
-                            size: 'N/A', 
-                            emails: [], 
-                            timestamp: now(), 
-                            source: 'excluded_location' 
-                        } 
-                    });
-                    break;
+    const searchTasks = [];
+
+    // --- Define Search Strategies ---
+    // 1. Primary Company Name via Google -> Hunter Domain Search
+    // Check if primary company is excluded before attempting search
+    if (primaryCompanyName && !primaryCompanyName.startsWith('Excluded')) {
+        searchTasks.push(async () => {
+            log.info(`Starting Google -> Hunter strategy for primary company: "${primaryCompanyName}"`);
+            const websiteUrl = await getWebsiteUrlFromGoogle(primaryCompanyName, rawLocation); // rawLocation currently unused by google search
+            if (websiteUrl) {
+                const domain = getDomainFromUrl(websiteUrl);
+                if (domain) {
+                    return await getCompanyInfoWithSource(domain, 'domain', 'primary_google_domain');
                 }
             }
-            
-            // Also check the full exclusion list if not already excluded
-            if (!isExcluded && Array.from(EXCLUDED_COMPANIES).some(excluded => 
-                normalizedLocation.includes(excluded.replace(/\s+/g, '')))) {
-                log.info(`Location contains excluded company - skipping API call`);
-                isExcluded = true;
-                allResults.push({ 
-                    source: 'location', 
-                    data: { 
-                        linkedin: 'Excluded', 
-                        domain: 'N/A', 
-                        size: 'N/A', 
-                        emails: [], 
-                        timestamp: now(), 
-                        source: 'excluded_location' 
-                    } 
-                });
+            log.info(`Google strategy failed for primary company "${primaryCompanyName}", falling back to company name search.`);
+            // Fallback: Search Hunter by company name if Google fails
+            return await getCompanyInfoWithSource(primaryCompanyName, 'company', 'primary_company_name_fallback');
+        });
+    } else {
+        log.info(`Skipping API searches for excluded/invalid primary company: "${primaryCompanyName}"`);
+    }
+
+    // 2. Parent Company Name via Google only (if applicable)
+    // Check if parent company is valid and not excluded
+    if (parsedParentCompany && parsedParentCompany !== primaryCompanyName && !parsedParentCompany.startsWith('Excluded')) {
+        searchTasks.push(async () => {
+            log.info(`Starting Google-only strategy for parent company: "${parsedParentCompany}"`);
+            const parentWebsiteUrl = await getWebsiteUrlFromGoogle(parsedParentCompany, ''); // Location less relevant for parent
+            if (parentWebsiteUrl) {
+                const parentDomain = getDomainFromUrl(parentWebsiteUrl);
+                if (parentDomain) {
+                    return await getCompanyInfoWithSource(parentDomain, 'domain', 'parent_google_domain');
+                }
             }
-            
-            // Only proceed with API call if not excluded
-            if (!isExcluded) {
-                log.info(`Searching Hunter API with full location: "${cleanedLocation}"`);
-                const locationInfo = await getCompanyInfoWithSource(cleanedLocation, '', 'full_location');
-                allResults.push({ source: 'location', data: locationInfo });
-                log.info(`Found ${locationInfo.emails.length} emails with full location "${cleanedLocation}"`);
+            log.info(`Google strategy failed for parent company "${parsedParentCompany}". No fallback to Hunter API for parent companies.`);
+            // No fallback to Hunter API for parent companies to avoid incorrect matches
+            return { linkedin: 'N/A', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: 'parent_company_no_google_result' };
+        });
+    }
+
+    // --- Execute Search Strategies ---
+    // Run strategies sequentially for now to manage API limits and logging clarity
+    for (const task of searchTasks) {
+        try {
+            const result = await task();
+            if (result) {
+                allResults.push(result);
             }
+        } catch (error) {
+            log.error(`Error executing search strategy: ${error.message}`);
         }
     }
-    
-    // Extract and ALWAYS try potential company names from the address
-    const potentialCompanies = extractPotentialCompaniesFromAddress(rawLocation);
-    log.info(`Extracted ${potentialCompanies.length} potential companies from address: ${potentialCompanies.join(', ')}`);
-    
-    // Process each potential company through parseCompanyAndLocation first to fix spacing issues
-    const parsedPotentialCompanies = potentialCompanies.map(company => {
-        const { name } = parseCompanyAndLocation(company);
-        return { original: company, parsed: name };
-    }).filter(item => item.parsed !== 'Unknown');
-    
-    log.info(`Parsed ${parsedPotentialCompanies.length} valid potential companies: ${
-        parsedPotentialCompanies.map(item => `${item.original} → ${item.parsed}`).join(', ')
-    }`);
-    
-    for (const { original: potentialCompany, parsed: parsedCompany } of parsedPotentialCompanies) {
-        // Skip if it's too similar to what we already tried
-        if (parsedCompany.toLowerCase() === cleanedCompany.toLowerCase() || 
-            parsedCompany.toLowerCase() === rawLocation.toLowerCase()) {
-            continue;
-        }
-        
-        // Skip excluded companies in potential matches
-        const normalizedPotential = parsedCompany.toLowerCase().replace(/\s+/g, '');
-        let isExcluded = false;
-        
-        // Check partial exclusions
-        for (const partialTerm of PARTIAL_EXCLUSIONS) {
-            const normalizedTerm = partialTerm.replace(/\s+/g, '');
-            if (normalizedPotential.includes(normalizedTerm)) {
-                log.info(`Potential company "${potentialCompany}" (parsed: "${parsedCompany}") contains excluded term "${partialTerm}" - skipping`);
-                isExcluded = true;
-                const index = parsedPotentialCompanies.findIndex(p => p.original === potentialCompany);
-                allResults.push({ 
-                    source: `excluded_potential_${index >= 0 ? index : 'unknown'}`, 
-                    data: { 
-                        linkedin: 'Excluded', 
-                        domain: 'N/A', 
-                        size: 'N/A', 
-                        emails: [], 
-                        timestamp: now(), 
-                        source: 'excluded_potential' 
-                    } 
-                });
-                break;
-            }
-        }
-        
-        // Check full exclusions
-        if (!isExcluded && Array.from(EXCLUDED_COMPANIES).some(excluded => 
-            normalizedPotential.includes(excluded.replace(/\s+/g, '')))) {
-            log.info(`Potential company "${potentialCompany}" (parsed: "${parsedCompany}") matches exclusion list - skipping`);
-            isExcluded = true;
-            const index = parsedPotentialCompanies.findIndex(p => p.original === potentialCompany);
-            allResults.push({ 
-                source: `excluded_potential_${index >= 0 ? index : 'unknown'}`, 
-                data: { 
-                    linkedin: 'Excluded', 
-                    domain: 'N/A', 
-                    size: 'N/A', 
-                    emails: [], 
-                    timestamp: now(), 
-                    source: 'excluded_potential' 
-                } 
-            });
-        }
-        
-        // Only proceed if not excluded
-        if (!isExcluded) {
-            log.info(`Searching Hunter API with potential company from address: "${parsedCompany}" (original: "${potentialCompany}")`);
-            const index = parsedPotentialCompanies.findIndex(p => p.original === potentialCompany);
-            const sourceId = `potential_${index >= 0 ? index : 'unknown'}`;
-            const potentialInfo = await getCompanyInfoWithSource(parsedCompany, '', sourceId);
-            allResults.push({ source: sourceId, data: potentialInfo });
-            log.info(`Found ${potentialInfo.emails.length} emails with potential company "${parsedCompany}"`);
-        }
-    }
-    
-    // ALWAYS merge all results to get the most comprehensive set
-    // This ensures we get both unit employees and corporate employees
+
+    // --- Merge Results ---
+    log.info(`Merging results from ${allResults.length} search strategies...`);
     const mergedResult = {
-        linkedin: '',
-        domain: '',
+        linkedin: '', // Changed to accumulate
+        domain: '',   // Changed to accumulate
         size: 'N/A',
         emails: [],
         timestamp: now(),
         source: 'merged',
         sourcesWithEmails: 0
     };
-    
-    // Track already added emails to avoid duplicates
     const addedEmails = new Set();
     const linkedins = new Set();
     const domains = new Set();
-    
-    // First pass: collect all unique LinkedIn URLs and domains
+
+    // Sort results: prioritize domain searches, then those with more emails
+    allResults.sort((a, b) => {
+        const aIsDomain = a.source?.includes('_domain');
+        const bIsDomain = b.source?.includes('_domain');
+        if (aIsDomain !== bIsDomain) return aIsDomain ? -1 : 1; // Domains first
+        return (b.emails?.length || 0) - (a.emails?.length || 0); // Then by email count
+    });
+
+    // Process sorted results
     for (const result of allResults) {
-        if (result.data.linkedin && result.data.linkedin !== 'N/A' && result.data.linkedin !== 'Excluded' && result.data.linkedin !== 'Error') {
-            linkedins.add(result.data.linkedin);
+        // Collect unique non-error LinkedIn URLs and Domains
+        if (result.linkedin && result.linkedin !== 'N/A' && result.linkedin !== 'Excluded' && result.linkedin !== 'Error') {
+            result.linkedin.split('; ').forEach(url => linkedins.add(url));
         }
-        if (result.data.domain && result.data.domain !== 'N/A') {
-            domains.add(result.data.domain);
+        if (result.domain && result.domain !== 'N/A') {
+            // Only add the first domain from each result to avoid mixing company and parent domains
+            const firstDomain = result.domain.split('; ')[0];
+            domains.add(firstDomain);
         }
-    }
-    
-    // Join all LinkedIn URLs and domains with semicolons
-    mergedResult.linkedin = Array.from(linkedins).join('; ') || 'N/A';
-    mergedResult.domain = Array.from(domains).join('; ') || 'N/A';
-    
-    // Sort results - put ones with emails first to ensure best quality data first
-    allResults.sort((a, b) => b.data.emails.length - a.data.emails.length);
-    
-    // Add emails from all sources
-    for (const result of allResults) {
-        // Track sources that contributed emails
-        if (result.data.emails.length > 0) {
+
+        // Get company size from the best available source (first one with valid size)
+        if (mergedResult.size === 'N/A' && result.size && result.size !== 'N/A') {
+            mergedResult.size = result.size;
+        }
+
+        // Add unique emails, attributing source
+        if (result.emails && result.emails.length > 0) {
             mergedResult.sourcesWithEmails++;
-        }
-        
-        // Get company size from best source if not set
-        if (mergedResult.size === 'N/A' && result.data.size !== 'N/A') {
-            mergedResult.size = result.data.size;
-        }
-        
-        // Add emails without duplicates
-        for (const email of result.data.emails) {
-            const emailKey = email.email.toLowerCase();
-            if (!addedEmails.has(emailKey)) {
-                addedEmails.add(emailKey);
-                // Add source information to each email for tracking
-                mergedResult.emails.push({
-                    ...email,
-                    source: result.source
-                });
+            for (const email of result.emails) {
+                if (email.email) {
+                    const emailKey = email.email.toLowerCase();
+                    if (!addedEmails.has(emailKey)) {
+                        addedEmails.add(emailKey);
+                        // Add source information from the specific Hunter result
+                        mergedResult.emails.push({
+                            ...email,
+                            source: result.source || 'unknown_source'
+                        });
+                    }
+                }
             }
         }
     }
-    
-    // Sort emails by job title priority
+
+    // Finalize accumulated LinkedIn and Domain strings
+    mergedResult.linkedin = Array.from(linkedins).join('; ') || 'N/A';
+    const finalDomains = Array.from(domains); // Keep as an array first
+
+    // Use only the first domain as the primary domain, not a concatenated string
+    mergedResult.domain = finalDomains.length > 0 ? finalDomains[0] : 'N/A';
+
+    // We no longer use the second domain as the parent domain
+    // Parent domain will be set explicitly later if available
+    mergedResult.parentDomain = null;
+
+    // Store all domains for reference (used for email matching)
+    mergedResult.allDomains = finalDomains;
+
+    // Add flag for matching final domain
+    if (finalDomains.length > 0) {
+        mergedResult.emails.forEach(email => {
+            if (email.email) {
+                const emailDomain = getDomainFromUrl(email.email);
+                if (emailDomain) {
+                    // Check if emailDomain exists in the list of final domains found
+                    email.matchesFinalDomain = finalDomains.some(fd => fd.toLowerCase() === emailDomain.toLowerCase());
+                } else {
+                    email.matchesFinalDomain = false; // Couldn't parse email domain
+                }
+            } else {
+                email.matchesFinalDomain = false; // No email address
+            }
+        });
+        log.info(`Added matchesFinalDomain flag to ${mergedResult.emails.length} emails based on final domains: [${finalDomains.join(', ')}]`);
+    } else {
+         // If no final domain was found, mark all as false
+         mergedResult.emails.forEach(email => {
+             email.matchesFinalDomain = false;
+         });
+         log.info(`No final domains found, setting matchesFinalDomain=false for all emails.`);
+    }
+    // *** END NEW ***
+
+    // Sort final merged emails by job title priority
     mergedResult.emails.sort((a, b) => getTitlePriority(a.title) - getTitlePriority(b.title));
-    
-    log.info(`RESULTS SUMMARY: Found ${mergedResult.emails.length} unique emails from ${mergedResult.sourcesWithEmails} search strategies`);
-    log.info(`LinkedIn URLs: ${mergedResult.linkedin}`);
-    log.info(`Domains: ${mergedResult.domain}`);
+
+    log.info(`MERGE SUMMARY for "${primaryCompanyName}": Found ${mergedResult.emails.length} unique emails from ${mergedResult.sourcesWithEmails} strategies.`);
+    log.info(`Final LinkedIn: ${mergedResult.linkedin}`);
+    log.info(`Final Domain: ${mergedResult.domain}`);
+    if (mergedResult.parentDomain) {
+        log.info(`Parent Domain: ${mergedResult.parentDomain}`);
+    }
+
     return mergedResult;
 }
 
@@ -1737,8 +1591,8 @@ async function exportData(data) {
     try {
         // Define headers
         const headers = [
-            'Title', 'Company', 'Parent Company', 'Location', 'Salary', 
-            'Contact Name', 'Contact Title', 'Email Address', 'URL', 
+            'Title', 'Company', 'Parent Company', 'Location', 'Salary',
+            'Contact Name', 'Contact Title', 'Email Address', 'URL',
             'Job Details', 'LinkedIn', 'Domain', 'Company Size', 'Date Added'
         ];
 
@@ -1810,7 +1664,7 @@ async function exportData(data) {
 
 async function exportToPostgres(data) {
     log.info(`>>> Entering exportToPostgres with ${data?.length || 0} items.`);
-    
+
     if (!Array.isArray(data) || data.length === 0) {
         log.warn('exportToPostgres called with invalid or empty data. Exiting.');
         return;
@@ -1822,7 +1676,7 @@ async function exportToPostgres(data) {
         log.info('Attempting to connect to database pool...');
         client = await pool.connect();
         log.info('Successfully connected client from pool.');
-        
+
         try {
             log.info('Starting database transaction (BEGIN).');
             await client.query('BEGIN');
@@ -1839,9 +1693,9 @@ async function exportToPostgres(data) {
                 const jobQuery = `
                     INSERT INTO culinary_jobs (
                         title, company, parent_company, location, salary,
-                        url, job_details, linkedin, domain, company_size, date_added
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-                    ON CONFLICT (url) DO UPDATE SET 
+                        url, job_details, linkedin, domain, parent_url, company_size, date_added
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                    ON CONFLICT (url) DO UPDATE SET
                         title = EXCLUDED.title,
                         company = EXCLUDED.company,
                         parent_company = EXCLUDED.parent_company,
@@ -1850,9 +1704,13 @@ async function exportToPostgres(data) {
                         job_details = EXCLUDED.job_details,
                         linkedin = EXCLUDED.linkedin,
                         domain = EXCLUDED.domain,
+                        parent_url = EXCLUDED.parent_url,
                         company_size = EXCLUDED.company_size,
                         last_updated = NOW()
                     RETURNING id`;
+
+                log.info(`DB EXPORT: Preparing to insert/update job: ${job.title} at ${job.company}`);
+                log.info(`DB EXPORT: Domain values - Primary: ${job.domain || 'N/A'}, Parent: ${job.parentUrl || 'N/A'}`);
 
                 const jobResult = await client.query(jobQuery, [
                     job.title || '',
@@ -1864,18 +1722,21 @@ async function exportToPostgres(data) {
                     job.jobDetails || '',
                     job.linkedin || null,
                     job.domain || null,
+                    job.parentUrl || null, // Add the parent_url parameter
                     job.size || null,
                 ]);
+
+                log.info(`DB EXPORT: Job inserted/updated successfully with ID: ${jobResult.rows[0].id}`);
 
                 const jobId = jobResult.rows[0].id;
 
                 // Now handle contacts if they exist
                 if (job.emails && Array.isArray(job.emails) && job.emails.length > 0) {
                     log.info(`Processing ${job.emails.length} contacts for job: ${job.title}`);
-                    
+
                     // First, delete any existing contacts for this job to avoid duplicates
                     await client.query('DELETE FROM culinary_contacts WHERE job_id = $1', [jobId]);
-                    
+
                     // Then insert all contacts
                     for (const contact of job.emails) {
                         if (!contact.email) continue; // Skip if no email
@@ -1898,16 +1759,16 @@ async function exportToPostgres(data) {
                     }
                 }
             }
-            
+
             if (skippedCount === data.length) {
                 log.warn(`All ${skippedCount} jobs in the batch were skipped due to missing fields. Committing empty transaction.`);
             } else {
                 log.info(`Processed ${data.length - skippedCount} jobs in the batch. Attempting COMMIT.`);
             }
-            
+
             await client.query('COMMIT');
             log.info(`Successfully COMMITTED transaction for ${data.length - skippedCount} jobs.`);
-            
+
         } catch (err) {
             log.error('DATABASE TRANSACTION ERROR (inside try/catch):', err);
             log.error('Failed job data (first item in batch):', data.length > 0 ? JSON.stringify(data[0], null, 2) : 'N/A');
@@ -1939,13 +1800,13 @@ async function exportToPostgres(data) {
 // Update the batch export handler
 async function handleBatchExport() {
     if (exportBatch.length >= EXPORT_BATCH_SIZE) {
-        log.info(`Batch size ${exportBatch.length} reached, exporting...`);
+        console.log(`Batch size ${exportBatch.length} reached, exporting...`); // Use console.log
         try {
             await exportToPostgres(exportBatch);
             exportBatch = []; // Clear the batch after successful export
-            log.info('Batch export completed successfully');
+            console.log('Batch export completed successfully'); // Use console.log
         } catch (error) {
-            log.error('Failed to export batch:', error);
+            console.error('Failed to export batch:', error); // Use console.error
             // Keep the batch for retry on next attempt
         }
     }
@@ -1979,10 +1840,11 @@ async function createTables() {
                 job_details TEXT,
                 linkedin VARCHAR(255),
                 domain VARCHAR(255),
+                parent_url VARCHAR(255),
                 company_size VARCHAR(50),
                 date_added TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                
+
                 -- Add indexes for common queries
                 CONSTRAINT unique_job_url UNIQUE (url),
                 CONSTRAINT unique_job_email UNIQUE (email, company)
@@ -2031,6 +1893,64 @@ Actor.main(async () => {
     let newlyAddedJobs = [];
     let skippedDuplicateJobs = [];
     let skippedExcludedJobs = [];
+
+    // Get input parameters
+    const input = await Actor.getInput() || {};
+
+    // Set API keys from input or environment variables
+    if (input.googlePlacesApiKey) {
+        process.env.GOOGLE_PLACES_API_KEY = input.googlePlacesApiKey;
+        log.info('Using Google Places API Key from input');
+    }
+
+    if (input.resendApiKey) {
+        process.env.RESEND_API_KEY = input.resendApiKey;
+        log.info('Using Resend API Key from input');
+    }
+
+    // Create new variables for input values instead of modifying constants
+    const inputTestMode = input.testMode !== undefined ? input.testMode : TEST_MODE;
+    const inputTestJobLimit = input.testJobLimit !== undefined ? input.testJobLimit : TEST_JOB_LIMIT;
+    const inputExportData = input.exportData !== undefined ? input.exportData : EXPORT_DATA;
+
+    log.info(`Using test mode: ${inputTestMode}`);
+    log.info(`Using test job limit: ${inputTestJobLimit}`);
+    log.info(`Using export data: ${inputExportData}`);
+
+    // Set clear cache from input
+    if (input.clearCache === true) {
+        log.info('Clear cache set to true, will clear company cache');
+        await clearCache();
+    }
+
+    // Initialize parentCompany variable
+    let parentCompany = null;
+
+    // Add parent company domain lookup if parent company exists
+    let parentDomain = null;
+    if (parentCompany) {
+        log.info(`PARENT LOOKUP: Starting domain lookup for parent company "${parentCompany}"`);
+
+        // Try to get parent company domain via Google
+        log.info(`PARENT LOOKUP: Attempting Google Places search for "${parentCompany}"`);
+        const parentWebsiteUrl = await getWebsiteUrlFromGoogle(parentCompany, '');
+
+        if (parentWebsiteUrl) {
+            parentDomain = getDomainFromUrl(parentWebsiteUrl);
+            log.info(`PARENT LOOKUP: SUCCESS - Found parent company domain via Google: ${parentDomain}`);
+        } else {
+            log.info(`PARENT LOOKUP: Google search failed for "${parentCompany}". Not using Hunter API for parent companies.`);
+            // No fallback to Hunter API for parent companies to avoid incorrect matches
+        }
+
+        // Final status log
+        if (parentDomain) {
+            log.info(`PARENT LOOKUP: FINAL RESULT - Will use domain "${parentDomain}" for parent company "${parentCompany}"`);
+        } else {
+            log.info(`PARENT LOOKUP: FINAL RESULT - No domain found for parent company "${parentCompany}"`);
+        }
+    }
+    const reportedJobUrls = new Set(); // Track URLs added to email report to prevent duplicates
     let state = null; // Initialize state here to access in finally block
 
     try {
@@ -2054,7 +1974,7 @@ Actor.main(async () => {
         // Initialize state store and request queue
         const stateStore = await KeyValueStore.open();
         // state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0 }; // Moved initialization up
-        state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0 }; 
+        state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0, attemptedCount: 0 }; // Added attemptedCount
         const requestQueue = await RequestQueue.open();
 
         // Add initial search URL
@@ -2071,24 +1991,27 @@ Actor.main(async () => {
             maxConcurrency: 1,
             minConcurrency: 1,
             requestHandlerTimeoutSecs: 120,
-            maxRequestsPerMinute: TEST_MODE ? 2 : 6,
+            maxRequestsPerMinute: inputTestMode ? 2 : 6,
             // REMOVED launchContext and preNavigationHooks
 
             // Replace requestHandler with logic from the old snippet
             async requestHandler({ $, request, log }) { // Ensure enqueueLinks is available if needed, or remove if not used by snippet
                 log.info(`Processing page ${request.url}`);
-                
-                // --- START: Logic from provided snippet --- 
+
+                // --- START: Logic from provided snippet ---
                 const jobCards = $('.ca-single-job-card');
                 log.info(`Found ${jobCards.length} jobs on page ${request.url}`);
-                
+
                 // Assume stateStore is initialized outside
-                const stateStore = await KeyValueStore.open(); 
-                const state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0 };
+                const stateStore = await KeyValueStore.open();
+                // Ensure state is loaded within the handler to get latest values, OR rely on the outer scope state variable.
+                // Reloading state here might overwrite increments from concurrent handlers if concurrency > 1.
+                // Sticking with outer scope `state` variable for now as concurrency is 1.
+                // state = await stateStore.getValue('SCRAPE_STATE') || { processedCount: 0, attemptedCount: 0 }; // Reload state
 
                 // Assume existingDataset is initialized outside
-                const existingDataset = await Dataset.open('culinary-jobs'); 
-                
+                const existingDataset = await Dataset.open('culinary-jobs');
+
                 // *** REMOVED PLACEHOLDER ***
                 // Assume existingUrls Set is initialized outside and populated if needed
                 // const existingUrls = new Set(); // Placeholder - this needs proper initialization
@@ -2105,25 +2028,25 @@ Actor.main(async () => {
                         await stateStore.setValue('TOTAL_JOBS', totalJobs);
                     }
                 }
-                
+
                 const listings = [];
-                const cardsToProcess = TEST_MODE ? 
-                    Math.min(TEST_JOB_LIMIT - (state.processedCount || 0), jobCards.length) : 
+                const cardsToProcess = inputTestMode ?
+                    Math.min(inputTestJobLimit - (state.processedCount || 0), jobCards.length) :
                     jobCards.length;
-                    
+
                 for (let i = 0; i < cardsToProcess; i++) {
                     const el = jobCards[i];
                     const jobUrl = ensureAbsoluteUrl($(el).attr('href')); // ensureAbsoluteUrl must be defined
-                    
+
                     // *** USE THE SET LOADED FROM DB ***
                     if (!jobUrl || existingUrlsFromDB.has(jobUrl)) {
                         if (jobUrl) {
                             log.info(`Skipping existing job: ${jobUrl}`);
                             // Track skipped duplicate
-                            skippedDuplicateJobs.push({ 
+                            skippedDuplicateJobs.push({
                                 url: jobUrl,
                                 title: $(el).find('.job-title strong').text().trim() || 'N/A',
-                                rawCompany: $(el).find('.text-body.text-ellipsis:not(.job-employment)').text().trim() || 'N/A' 
+                                rawCompany: $(el).find('.text-body.text-ellipsis:not(.job-employment)').text().trim() || 'N/A'
                             });
                         }
                         continue;
@@ -2132,7 +2055,7 @@ Actor.main(async () => {
                     const rawCompany = $(el).find('.text-body.text-ellipsis:not(.job-employment)').text().trim() || 'Unknown';
                     const { name: company } = parseCompanyAndLocation(rawCompany); // parseCompanyAndLocation must be defined
                     const fullAddress = $(el).find('.text-muted.text-ellipsis').text().trim() || 'N/A';
-                    
+
                     // Skip excluded companies entirely
                     if (company.startsWith('Excluded')) {
                         log.info(`Skipping excluded company job: ${title} at ${rawCompany} (URL: ${jobUrl})`);
@@ -2140,23 +2063,27 @@ Actor.main(async () => {
                         skippedExcludedJobs.push({ url: jobUrl, title, rawCompany, reason: company });
                         continue; // Go to the next job card, don't add this one to listings
                     }
-                    
-                    listings.push({ 
-                        url: jobUrl, 
-                        title, 
+
+                    listings.push({
+                        url: jobUrl,
+                        title,
                         company,
                         location: fullAddress,
                         searchLocation: cleanCompanyName(fullAddress), // cleanCompanyName must be defined
                         salary: $(el).find('.job-employment').text().trim() || 'N/A'
                     });
                 }
-                
+
                 if (listings.length > 0) {
                     log.info(`Processing batch of ${listings.length} new listings`);
                     const jobDetailsArray = [];
                     for (const listing of listings) {
+                        // Increment attemptedCount for every job that passed initial filters
+                        state.attemptedCount = (state.attemptedCount || 0) + 1;
+                        log.debug(`Attempting job ${state.attemptedCount}: ${listing.url}`); // Add debug log
+
                         try {
-                            await delay(TEST_MODE ? 1000 : 2000); // delay must be defined
+                            await delay(inputTestMode ? 1000 : 2000); // delay must be defined
                             const response = await fetch(listing.url, { method: 'GET' });
                             const body = await response.text();
                             if (!response.ok) {
@@ -2165,7 +2092,7 @@ Actor.main(async () => {
                             }
                             const $detail = cheerio.load(body);
                             const jobDetailsText = $detail('#job-details .text-muted div').text().trim() || 'N/A';
-                            
+
                             let parentCompany = null;
                             const partOfElement = $detail('p:contains("Part of")');
                             if (partOfElement.length > 0) {
@@ -2174,79 +2101,60 @@ Actor.main(async () => {
                                     parentCompany = partOfLink.text().trim();
                                 }
                             }
-                            
+
                             let leadership = [];
                             const leadershipSection = $detail('.leadership-section');
                             if (leadershipSection.length > 0) {
-                                leadershipSection.find('a.text-body').each((i, leaderEl) => {
+                                leadershipSection.find('a.text-body').each((_, leaderEl) => {
                                     const leader = $detail(leaderEl);
                                     const name = leader.find('.font-weight-bold').text().trim();
                                     const title = leader.find('p').text().trim() || 'N/A';
                                     if (name) leadership.push({ name, title });
                                 });
                             }
-                            
-                            let contactInfo; // Declare contactInfo
+
+                            // ALWAYS call the main orchestrator function
+                            log.info(`Getting contact info for "${listing.company}" (Parent: ${parentCompany || 'N/A'})`);
+
+                            // Get parent domain if parent company exists
+                            let parentDomain = null;
                             if (parentCompany) {
-                                log.info(`Using parent company "${parentCompany}" for contact search`);
-                                const parentContactInfo = await getCompanyInfoWithSource(parentCompany, '', 'parent_company'); // getCompanyInfoWithSource must be defined
-                                const companyContactInfo = await getCompanyInfoWithSource(listing.company, '', 'subsidiary_company');
-                                
-                                const hasParentEmails = parentContactInfo?.emails && Array.isArray(parentContactInfo.emails);
-                                const hasCompanyEmails = companyContactInfo?.emails && Array.isArray(companyContactInfo.emails);
-                                const parentEmailCount = hasParentEmails ? parentContactInfo.emails.length : 0;
-                                const companyEmailCount = hasCompanyEmails ? companyContactInfo.emails.length : 0;
-                                
-                                log.info(`Parent company source: ${parentContactInfo.source || 'unknown'}, emails: ${parentEmailCount}`);
-                                log.info(`Original company source: ${companyContactInfo.source || 'unknown'}, emails: ${companyEmailCount}`);
-                                
-                                const emailMap = new Map();
-                                if (hasParentEmails) {
-                                    for (const email of parentContactInfo.emails) {
-                                        if (email?.email) { 
-                                            const key = email.email.toLowerCase();
-                                            if (!emailMap.has(key)) emailMap.set(key, {...JSON.parse(JSON.stringify(email)), source: 'parent_company'});
-                                        }
-                                    }
+                                log.info(`Looking up parent domain for "${parentCompany}"`);
+                                // Try to get parent company domain via Google only
+                                const parentWebsiteUrl = await getWebsiteUrlFromGoogle(parentCompany, '');
+                                if (parentWebsiteUrl) {
+                                    parentDomain = getDomainFromUrl(parentWebsiteUrl);
+                                    log.info(`Found parent domain via Google: ${parentDomain}`);
+                                } else {
+                                    log.info(`Google search failed for parent company "${parentCompany}". Not using Hunter API for parent companies.`);
+                                    // No fallback to Hunter API for parent companies to avoid incorrect matches
                                 }
-                                if (hasCompanyEmails) {
-                                    for (const email of companyContactInfo.emails) {
-                                        if (email?.email) { 
-                                            const key = email.email.toLowerCase();
-                                            if (!emailMap.has(key)) emailMap.set(key, {...JSON.parse(JSON.stringify(email)), source: 'subsidiary_company'});
-                                        }
-                                    }
-                                }
-                                
-                                const combinedEmails = Array.from(emailMap.values())
-                                    .sort((a, b) => getTitlePriority(a.title) - getTitlePriority(b.title)); // getTitlePriority must be defined
-                                    
-                                contactInfo = {
-                                    linkedin: parentContactInfo.linkedin || companyContactInfo.linkedin || 'N/A',
-                                    domain: parentContactInfo.domain || companyContactInfo.domain || 'N/A',
-                                    size: parentContactInfo.size || companyContactInfo.size || 'N/A',
-                                    emails: combinedEmails,
-                                    timestamp: now(),
-                                    source: parentEmailCount > 0 ? 'parent_company' : 'subsidiary_company'
-                                };
-                                log.info(`Combined contacts, ${combinedEmails.length} unique emails`);
-                            } else {
-                                log.info(`Getting contact info for "${listing.company}"`);
-                                contactInfo = await getCompanyInfo(listing.company, ''); // getCompanyInfo must be defined
                             }
-                            
-                            const emailsText = contactInfo.emails.length > 0 
-                                ? contactInfo.emails.map(e => `${e.name || 'Unknown'}, ${e.title || 'N/A'}, ${e.email || 'N/A'}`).join('; ') 
+
+                            const contactInfo = await getCompanyInfo(
+                                listing.company,     // The primary company name from the listing
+                                listing.location,    // The raw location string from the listing
+                                parentCompany        // The detected parent company name (or null)
+                            );
+
+                            // Add parent domain to contact info if found
+                            if (parentDomain) {
+                                contactInfo.parentDomain = parentDomain;
+                                log.info(`Setting parent domain for ${listing.company}: ${parentDomain}`);
+                            }
+
+                            const emailsText = contactInfo.emails.length > 0
+                                ? contactInfo.emails.map(e => `${e.name || 'Unknown'}, ${e.title || 'N/A'}, ${e.email || 'N/A'}`).join('; ')
                                 : 'No emails found';
-                                
+
                             log.info(`Found ${contactInfo.emails.length} emails for "${listing.company}": ${emailsText}`);
-                            
+
                             let emailsCopy = [];
                             if (contactInfo.emails && contactInfo.emails.length > 0) {
                                 const emailsJSON = JSON.stringify(contactInfo.emails);
                                 emailsCopy = JSON.parse(emailsJSON);
                                 emailsCopy = emailsCopy.slice(0, 20); // Changed from 3 to 20 to get up to 20 best contacts
-                                
+
                                 emailsCopy = emailsCopy.map((email, idx) => {
                                     const contactCompany = email._originalCompany || 'unknown';
                                     return {
@@ -2263,7 +2171,7 @@ Actor.main(async () => {
                                     };
                                 });
                             }
-                            
+
                             const jobDetail = {
                                 title: String(listing.title || ''),
                                 company: String(listing.company || ''),
@@ -2279,34 +2187,43 @@ Actor.main(async () => {
                                 emails: emailsCopy,
                                 emailsText,
                                 domain: contactInfo.domain || 'N/A',
+                                parentUrl: contactInfo.parentDomain || null, // Add parent domain URL
                                 size: contactInfo.size || 'N/A',
                                 dataSource: contactInfo.source || 'unknown',
                                 dataDate: now(),
-                                dateAdded: now(), 
+                                dateAdded: now(),
                                 _processId: Date.now()
                             };
-                            
+
                             const verifiedDetail = JSON.parse(JSON.stringify(jobDetail));
                             jobDetailsArray.push(verifiedDetail);
-                            // Track newly added job details for reporting
-                            newlyAddedJobs.push({ 
-                                title: verifiedDetail.title, 
-                                company: verifiedDetail.company, 
-                                parentCompany: verifiedDetail.parentCompany, 
-                                location: verifiedDetail.location 
-                            });
+                            // Track newly added job details for reporting - ENSURE UNIQUE
+                            if (!reportedJobUrls.has(verifiedDetail.url)) {
+                                log.info(`Adding to email report (URL: ${verifiedDetail.url})`); // Added log
+                                newlyAddedJobs.push({
+                                    title: verifiedDetail.title,
+                                    company: verifiedDetail.company,
+                                    parentCompany: verifiedDetail.parentCompany,
+                                    location: verifiedDetail.location
+                                });
+                                reportedJobUrls.add(verifiedDetail.url); // Add URL to set
+                            } else {
+                                log.info(`Skipping email report for already reported URL: ${verifiedDetail.url}`); // Added log
+                            }
                             log.info(`Processed job: ${listing.title} at ${listing.company} with ${verifiedDetail.emails.length} contacts`);
+                            // Correctly increment processedCount here, attemptedCount is incremented before fetch
                             state.processedCount = (state.processedCount || 0) + 1;
                         } catch (error) {
                             log.error(`Error fetching details for ${listing.url}: ${error.message}`);
+                            // Note: state.attemptedCount was already incremented, state.processedCount was not.
                         }
                     }
-                    
+
                     if (jobDetailsArray.length > 0) {
                         try {
                             await existingDataset.pushData(jobDetailsArray);
                             const jobDetailsCopy = JSON.parse(JSON.stringify(jobDetailsArray));
-                            
+
                             // Validation for duplicate emails within the same job
                             jobDetailsCopy.forEach(job => {
                                 if (job.emails && job.emails.length > 0) {
@@ -2319,14 +2236,15 @@ Actor.main(async () => {
                                     });
                                 }
                             });
-                            
+
                             exportBatch.push(...jobDetailsCopy); // Use global exportBatch
                             log.info(`Current export batch size: ${exportBatch.length}`);
                             await stateStore.setValue('SCRAPE_STATE', state);
-                            
+
                             if (exportBatch.length >= EXPORT_BATCH_SIZE) {
                                 log.info(`EXPORT TRIGGERED: Batch size ${exportBatch.length}`);
-                                const dataToExport = JSON.parse(JSON.stringify(exportBatch));
+                                // Create a copy of the batch for logging purposes
+                                log.info(`Exporting ${exportBatch.length} jobs...`);
                                 await handleBatchExport(); // This function now uses the global exportBatch
                                 log.info(`Cleared export batch after successful/attempted export.`);
                                 // Note: handleBatchExport should clear the global exportBatch on success
@@ -2336,39 +2254,42 @@ Actor.main(async () => {
                         }
                     }
                 }
-                
-                log.info(`Jobs processed: ${state.processedCount}/${TEST_MODE ? TEST_JOB_LIMIT : (await stateStore.getValue('TOTAL_JOBS') || 2000)}`);
-                
-                if (TEST_MODE && state.processedCount >= TEST_JOB_LIMIT) {
-                    log.info(`Test mode: Reached limit of ${TEST_JOB_LIMIT} jobs. Stopping crawler.`);
-                    // await requestQueue.drop(); // This might be too abrupt, let current finish
-                    return;
+
+                // --- Test Mode Check ---
+                // Add this block BEFORE the main pagination logic
+                if (inputTestMode && (state.processedCount || 0) >= inputTestJobLimit) {
+                    log.info(`Test mode: Reached limit of ${state.processedCount || 0}/${inputTestJobLimit} processed jobs. Stopping crawler.`);
+                    // Save state one last time before stopping
+                    await stateStore.setValue('SCRAPE_STATE', state);
+                    return; // Exit the handler to prevent queueing next page
                 }
-                
-                const nextPage = request.userData?.page || 1;
-                const totalJobsTarget = TEST_MODE ? TEST_JOB_LIMIT : (await stateStore.getValue('TOTAL_JOBS') || 2000);
-                const jobsPerPage = 20; // Culinary Agents shows 20 jobs per page
-                const maxPages = Math.ceil(totalJobsTarget / jobsPerPage);
-                const currentOffset = (nextPage -1) * jobsPerPage; // Offset of the page *just processed*
 
-                // --- MODIFIED STOPPING CONDITION ---
-                // Stop if we've processed enough *or* if the next page would exceed the total expected jobs
-                if (state.processedCount < totalJobsTarget && nextPage <= maxPages) {
-                // --- END MODIFICATION ---
+                // --- Calculate current accounted jobs ---
+                const accountedJobs = (skippedDuplicateJobs.length + skippedExcludedJobs.length + (state.attemptedCount || 0));
+                const totalJobsTarget = await stateStore.getValue('TOTAL_JOBS') || 2000; // Use a default if not found
 
+                log.info(`Jobs accounted for: ${accountedJobs} (Skipped D: ${skippedDuplicateJobs.length}, Skipped E: ${skippedExcludedJobs.length}, Attempted: ${state.attemptedCount || 0}) / Target: ${totalJobsTarget}`);
+
+                // Check if we should stop queueing
+                const shouldContinue = jobCards.length > 0 && accountedJobs < totalJobsTarget;
+
+                if (shouldContinue) {
+                    const nextPage = request.userData?.page || 1;
+                    const jobsPerPage = 20; // Culinary Agents shows 20 jobs per page
                     const nextPageUrl = `https://culinaryagents.com/search/jobs?search%5Bcompensation%5D%5B%5D=salary&offset=${nextPage * jobsPerPage}`; // Use jobsPerPage here
-                    log.info(`Queueing next page (${nextPage + 1}/${maxPages}): ${nextPageUrl}`);
-                    await delay(TEST_MODE ? 5000 : 30000); // Consider reducing delay if only skipping
+                    log.info(`Continuing crawl: Accounted for ${accountedJobs}/${totalJobsTarget}. Queueing next page (${nextPage + 1}): ${nextPageUrl}`);
+                    await delay(inputTestMode ? 5000 : 30000); // Consider reducing delay if only skipping
                     await requestQueue.addRequest({ url: nextPageUrl, userData: { page: nextPage + 1 } });
                 } else {
-                    if (nextPage > maxPages) {
-                         log.info(`Reached maximum expected page (${maxPages}) based on total jobs (${totalJobsTarget}). No more pages will be queued.`);
+                    if (jobCards.length === 0) {
+                         log.info(`Stopping crawl: Current page had 0 job cards.`);
                     } else {
-                        log.info(`Reached target processing count of ${state.processedCount}/${totalJobsTarget} jobs. No more pages will be queued.`);
+                        log.info(`Stopping crawl: Accounted for ${accountedJobs}/${totalJobsTarget} jobs.`);
                     }
+                    // Save state one last time potentially
                     await stateStore.setValue('SCRAPE_STATE', state);
                 }
-                // --- END: Logic from provided snippet --- 
+                // --- END: Logic from provided snippet ---
             },
 
             failedRequestHandler({ request, error, log }) {
@@ -2399,13 +2320,14 @@ Actor.main(async () => {
             // Optionally drop queue if timeout occurs
             // await requestQueue.drop();
         }
-        
+
         await saveCache(); // saveCache must be defined
-        
+
         // Final export if any remaining jobs
-        if (EXPORT_DATA && exportBatch.length > 0) { // Use global exportBatch
+        if (inputExportData && exportBatch.length > 0) { // Use global exportBatch
             log.info(`Exporting final batch of ${exportBatch.length} results...`);
-            const dataToExport = JSON.parse(JSON.stringify(exportBatch)); 
+            // Create a copy of the batch for logging purposes
+            log.info(`Exporting ${exportBatch.length} jobs...`);
             await handleBatchExport(); // Should use and clear global exportBatch
         }
         log.info(`Scraping completed! Total jobs processed: ${state ? state.processedCount : 'N/A'}`);
@@ -2418,10 +2340,10 @@ Actor.main(async () => {
         if (err.stack) log.error(err.stack);
     } finally {
         // Ensure final batch export happens even on error/timeout
-        if (EXPORT_DATA && exportBatch.length > 0) { // Use global exportBatch
-            log.warn(`Error or timeout occurred. Exporting final batch of ${exportBatch.length} results...`);
+        if (inputExportData && exportBatch.length > 0) { // Use global exportBatch
+            console.warn(`Error or timeout occurred. Exporting final batch of ${exportBatch.length} results...`); // Use console.warn
             try {
-                await handleBatchExport(); 
+                await handleBatchExport();
             } catch (exportError) {
                 log.error("Error during final batch export in finally block:", exportError);
             }
@@ -2447,11 +2369,11 @@ Actor.main(async () => {
 
 // *** ADDED FUNCTION: Send Completion Email ***
 async function sendCompletionEmail(stats) {
-    log.info("Preparing completion email...");
+    console.log("Preparing completion email..."); // Use console.log
     const apiKey = process.env.RESEND_API_KEY;
 
     if (!apiKey) {
-        log.warn("RESEND_API_KEY environment variable not found. Skipping email notification.");
+        console.warn("RESEND_API_KEY environment variable not found. Skipping email notification."); // Use console.warn
         return;
     }
 
@@ -2460,32 +2382,32 @@ async function sendCompletionEmail(stats) {
     // --- Fetch Random Quote ---
     let quoteHtml = '';
     try {
-        log.info("Fetching random quote...");
+        console.log("Fetching random quote..."); // Use console.log
         const quoteResponse = await fetch('https://api.realinspire.live/v1/quotes/random');
         if (quoteResponse.ok) {
             const quoteData = await quoteResponse.json();
             if (Array.isArray(quoteData) && quoteData.length > 0) {
                 const quote = quoteData[0];
                 if (quote.content && quote.author) {
-                    quoteHtml = `<p style="font-style: italic; margin-top: 20px; padding-top: 10px; border-top: 1px dashed #ccc;">"${quote.content}" - ${quote.author}</p>`;
-                    log.info(`Quote fetched: "${quote.content}"`);
+                    quoteHtml = `<p style="font-style: italic; margin-top: 20px; padding-top: 10px; border-top: 1px dashed #ccc; color: #000000;">"${quote.content}" - ${quote.author}</p>`;
+                    console.log(`Quote fetched: "${quote.content}"`); // Use console.log
                 }
             }
         } else {
-            log.warn(`Failed to fetch quote: ${quoteResponse.status}`);
+            console.warn(`Failed to fetch quote: ${quoteResponse.status}`); // Use console.warn
         }
     } catch (quoteError) {
-        log.error("Error fetching random quote:", quoteError);
+        console.error("Error fetching random quote:", quoteError); // Use console.error
     }
     // --- End Fetch Random Quote ---
 
     // Format Date/Time in PST
-    const completionTimePST = new Date(stats.endTime).toLocaleString("en-US", { 
+    const completionTimePST = new Date(stats.endTime).toLocaleString("en-US", {
         timeZone: "America/Los_Angeles",
-        year: 'numeric', month: 'long', day: 'numeric', 
-        hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true 
+        year: 'numeric', month: 'long', day: 'numeric',
+        hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true
     });
-    const todayDate = new Date().toLocaleDateString("en-US", { 
+    const todayDate = new Date().toLocaleDateString("en-US", {
         timeZone: "America/Los_Angeles",
         year: 'numeric', month: 'long', day: 'numeric'
     });
@@ -2494,65 +2416,92 @@ async function sendCompletionEmail(stats) {
     // Updated to accept inline style string
     const formatJobList = (jobList, includeParent = false, itemStyle = "") => { // Corrected default parameter syntax
         if (!jobList || jobList.length === 0) return `<li style="${itemStyle}">None</li>`;
-        return jobList.map(job => 
+        return jobList.map(job =>
             `<li style="${itemStyle}">${job.title || 'N/A'} at ${job.company || job.rawCompany || 'N/A'} ${includeParent && job.parentCompany && job.parentCompany !== 'N/A' ? `(Parent: ${job.parentCompany})` : ''} - ${job.location || 'N/A'}</li>`
         ).join("");
     };
 
-    const newJobStyle = 'font-size: 12pt; color: #90EE90; text-align: left;';
-    const excludedJobStyle = 'font-size: 12pt; color: #FFFF00; text-align: left;'; // Yellow might be hard to read
+    const newJobStyle = 'font-size: 12pt; color: #000000; text-align: left;';
+    const excludedJobStyle = 'font-size: 12pt; color: #000000; text-align: left;';
 
     const newlyAddedListHtml = formatJobList(stats.newlyAddedJobs, true, newJobStyle);
-    const skippedExcludedListHtml = formatJobList(stats.skippedExcludedJobs.map(j => ({...j, company: j.rawCompany})), false, excludedJobStyle);
+
+    // De-duplicate skipped excluded jobs by URL before formatting
+    const uniqueSkippedExcludedUrls = new Set();
+    const uniqueSkippedExcludedJobs = stats.skippedExcludedJobs.filter(job => {
+        if (!job || !job.url) return false; // Skip if job or URL is missing
+        const lowerUrl = job.url.toLowerCase();
+        if (uniqueSkippedExcludedUrls.has(lowerUrl)) {
+            return false;
+        } else {
+            uniqueSkippedExcludedUrls.add(lowerUrl);
+            return true;
+        }
+    });
+
+    const skippedExcludedListHtml = formatJobList(uniqueSkippedExcludedJobs.map(j => ({...j, company: j.rawCompany})), false, excludedJobStyle);
+
     // Note: skippedDuplicateJobs only has rawCompany, so we format it slightly differently if needed
     // const skippedDuplicateListHtml = formatJobList(stats.skippedDuplicateJobs, false);
 
     const subject = `BizDev Results for ${todayDate}`;
     const htmlBody = `
         <p style="font-weight: bold; font-size: 24pt; color: #000000; text-align: center;">Your Culinary Agent scraper completed at ${completionTimePST}</p>
-        <p>Duration: ${Math.round(stats.durationMs / 60000)} minutes (${Math.round(stats.durationMs / 1000)} seconds)</p>
-        
+        <p style="color: #000000;">Duration: ${Math.round(stats.durationMs / 60000)} minutes (${Math.round(stats.durationMs / 1000)} seconds)</p>
+
         <h2>Summary</h2>
-        <ul>
-            <li><b>${stats.newlyAddedJobs.length}</b> new listings were processed and added/updated in the database.</li>
+        <ul style="color: #000000;">
+            <li><b>${stats.processedCount || 0}</b> listings were successfully processed.</li>
+            <li><b>${stats.newlyAddedJobs.length}</b> listings added to this email report (unique URL for this run).</li>
             <li><b>${stats.skippedDuplicateJobs.length}</b> listings were skipped (already in DB).</li>
-            <li><b>${stats.skippedExcludedJobs.length}</b> listings were skipped (excluded company).</li>
+            <li><b>${uniqueSkippedExcludedJobs.length}</b> unique listings were skipped (excluded company).</li>
         </ul>
 
         <h2>New Listings Processed:</h2>
-        <ul style="list-style-type: none; padding-left: 0;">
+        <ul style="list-style-type: disc; padding-left: 20px; color: #000000;">
             ${newlyAddedListHtml}
         </ul>
 
         <hr>
 
-        <h2>Excluded Listings Skipped:</h2>
-        <ul style="list-style-type: none; padding-left: 0;">
+        <h2>Excluded Listings:</h2>
+        <p style="font-size: 10pt; color: #000000;">Current Exclusion List (Exact Match): Alliance Personnel, August Point Advisors, Bon Appetit, Capital Restaurant Associates, Chartwells, Compass, CORE Recruitment, EHS Recruiting, Empowered Hospitality, Eurest, Goodwin Recruiting, HMG Plus - New York, LSG Sky Chefs, Major Food Group, Measured HR, One Haus, Patrice & Associates, Persone NYC, Playbook Advisors, Restaurant Associates, Source One Hospitality, STARR, Ten Five Hospitality, The Goodkind Group, Tuttle Hospitality, Willow Tree Recruiting, washington, washington dc, washington d.c., washington d c | (Partial Match): whole foods</p>
+        <ul style="list-style-type: disc; padding-left: 20px; color: #000000;">
             ${skippedExcludedListHtml}
         </ul>
 
-        ${quoteHtml} {/* Insert the fetched quote here */}
+        ${quoteHtml}
 
-        <p>You can review new listings at <a href="https://madisonbizdev-production.up.railway.app/">https://madisonbizdev-production.up.railway.app/</a></p>
+        <p style="color: #000000;">You can review new listings at <a href="https://madisonbizdev-production.up.railway.app/" style="color: #0000FF;">https://madisonbizdev-production.up.railway.app/</a></p>
     `;
 
-    try {
-        log.info(`Sending completion email to aj@chefsheet.com...`);
-        const { data, error } = await resend.emails.send({
-            from: 'Culinary Scraper <onboarding@resend.dev>', // Sender name is good practice
-            to: ['aj@chefsheet.com'], // Use array for recipients
-            subject: subject,
-            html: htmlBody,
-        });
+    // *** START CHANGE: Send separate emails ***
+    const recipients = ['aj@chefsheet.com', 'martha@madison-collective.com'];
+    console.log(`Attempting to send completion emails to: ${recipients.join(', ')}`);
 
-        if (error) {
-            log.error("Failed to send completion email via Resend:", error);
-        } else {
-            log.info("Completion email sent successfully:", data);
+    for (const recipient of recipients) {
+        try {
+            console.log(`Sending email to ${recipient}...`); // Use console.log
+            const { data, error } = await resend.emails.send({
+                from: 'Culinary Scraper <onboarding@resend.dev>', // Sender name is good practice
+                to: [recipient], // Send to one recipient at a time in an array
+                subject: subject,
+                html: htmlBody,
+            });
+
+            if (error) {
+                // Log specific error for this recipient
+                console.error(`Failed to send completion email to ${recipient}:`, error); // Use console.error
+            } else {
+                // Log specific success for this recipient
+                console.log(`Completion email sent successfully to ${recipient}:`, data); // Use console.log
+            }
+        } catch (emailError) {
+            // Catch errors during the send process for this recipient
+            console.error(`Error during email sending process for ${recipient}:`, emailError); // Use console.error
         }
-    } catch (emailError) {
-        log.error("Error during email sending process:", emailError);
     }
+    // *** END CHANGE ***
 }
 
 // Your existing helper functions remain the same...
@@ -2595,10 +2544,63 @@ async function loadExistingJobUrlsFromDB() {
     } catch (error) {
         log.error('Failed to load existing job URLs from database:', error);
         // Return an empty set to allow the crawler to proceed, though it might process duplicates
-        return existingUrls; 
+        return existingUrls;
     } finally {
         if (client) {
             client.release();
         }
     }
 }
+
+// *** NEW HELPER FUNCTIONS START ***
+
+/**
+ * Extracts the base domain name from a URL.
+ * e.g., "https://www.example.com/path?query=1" -> "example.com"
+ * Handles common variations.
+ */
+function getDomainFromUrl(url) {
+    if (!url) return null;
+    try {
+        const parsedUrl = new URL(url.startsWith('http') ? url : `http://${url}`);
+        // Use hostname, remove potential 'www.' prefix
+        let domain = parsedUrl.hostname;
+        if (domain.startsWith('www.')) {
+            domain = domain.substring(4);
+        }
+        return domain;
+    } catch (e) {
+        console.warn(`Failed to parse URL for domain extraction: ${url}`, e); // Use console
+        // Fallback for simple cases if URL constructor fails
+        let domain = url.replace(/^https?:\/\//, ''); // Remove http(s)://
+        domain = domain.replace(/^www\./, '');       // Remove www.
+        domain = domain.split('/')[0];              // Remove path
+        domain = domain.split('?')[0];              // Remove query string
+        domain = domain.split(':')[0];              // Remove port
+        // Basic check if it looks like a domain
+        if (domain.includes('.')) {
+             return domain;
+        }
+        return null;
+    }
+}
+
+// Import the SearchAPI function
+import getWebsiteUrlFromSearchAPI from './search_api.js';
+
+/**
+ * Uses SearchAPI.io to find the website URL for a business name.
+ * This function replaces the previous Google Places API implementation.
+ */
+async function getWebsiteUrlFromGoogle(companyName, _location) {
+    // _location parameter is kept for backward compatibility but not used
+    // For backward compatibility, we keep the same function name
+    // but now it uses SearchAPI.io instead of Google Places API
+    console.info(`Using SearchAPI instead of Google Places for "${companyName}"`);
+    return await getWebsiteUrlFromSearchAPI(companyName);
+
+    // The old Google Places API code has been removed
+    // If you need to revert, check version control history
+}
+
+// *** NEW HELPER FUNCTIONS END ***

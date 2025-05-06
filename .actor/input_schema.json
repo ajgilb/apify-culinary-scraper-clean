@@ -1,0 +1,61 @@
+{
+  "title": "Culinary Scraper Input",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "googlePlacesApiKey": {
+      "title": "Google Places API Key",
+      "type": "string",
+      "description": "Your Google Places API key",
+      "editor": "textfield",
+      "isSecret": true
+    },
+    "resendApiKey": {
+      "title": "Resend API Key",
+      "type": "string",
+      "description": "Your Resend API key for email notifications",
+      "editor": "textfield",
+      "isSecret": true
+    },
+    "testMode": {
+      "title": "Test Mode",
+      "type": "boolean",
+      "description": "Enable test mode to limit the number of jobs processed",
+      "default": false
+    },
+    "testJobLimit": {
+      "title": "Test Job Limit",
+      "type": "integer",
+      "description": "Maximum number of jobs to process in test mode",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 100
+    },
+    "clearCache": {
+      "title": "Clear Cache",
+      "type": "boolean",
+      "description": "If true, will clear the company cache before starting",
+      "default": false
+    },
+    "exportData": {
+      "title": "Export Data",
+      "type": "boolean",
+      "description": "If true, will export data to PostgreSQL database",
+      "default": true
+    },
+    "username": {
+      "title": "Username",
+      "type": "string",
+      "description": "Username for authentication",
+      "editor": "textfield"
+    },
+    "password": {
+      "title": "Password",
+      "type": "string",
+      "description": "Password for authentication",
+      "editor": "textfield",
+      "isSecret": true
+    }
+  },
+  "required": []
+}

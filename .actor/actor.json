@@ -6,44 +6,7 @@
   "version": "1.1",
   "buildTag": "latest",
   "dockerfile": "./Dockerfile",
-  "input": {
-    "title": "Input schema for Culinary Agents Scraper",
-    "type": "object",
-    "schemaVersion": 1,
-    "properties": {
-      "testMode": {
-        "title": "Test Mode",
-        "type": "boolean",
-        "description": "If true, will only process a limited number of jobs",
-        "default": false
-      },
-      "testJobLimit": {
-        "title": "Test Job Limit",
-        "type": "integer",
-        "description": "Number of jobs to process in test mode",
-        "default": 5
-      },
-      "exportData": {
-        "title": "Export Data",
-        "type": "boolean",
-        "description": "If true, will export data to PostgreSQL database",
-        "default": true
-      },
-      "batchSize": {
-        "title": "Export Batch Size",
-        "type": "integer",
-        "description": "Number of jobs to accumulate before exporting to database",
-        "default": 10
-      },
-      "clearCache": {
-        "title": "Clear Cache",
-        "type": "boolean",
-        "description": "If true, will clear the company cache before starting",
-        "default": false
-      }
-    },
-    "required": ["testMode", "exportData"]
-  },
+  "input": "./input_schema.json",
   "defaultRunOptions": {
     "build": "latest",
     "memoryMbytes": 4096,
