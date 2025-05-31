@@ -58,16 +58,8 @@ pool.on('error', (err) => {
 // Create a global array to store jobs - used for global state only
 let allProcessedJobs = [];
 
-// Hunter.io API Configuration
-const HUNTER_API_KEY = '8257696b56b9d35fe21a3d546e801e635a8b14a7';
-const DOMAIN_SEARCH_API_URL = 'https://api.hunter.io/v2/domain-search';
-const API_TIMEOUT_MS = 30000;
-const BATCH_PAUSE_MS = 5000;
-const CACHE_MAX_AGE_DAYS = 30;
-
-// IMPORTANT: Set this to true to disable caching and force fresh Hunter API calls for each company
-// This ensures we don't get the same contacts for different companies
-const DISABLE_COMPANY_CACHE = true;
+// Contact collection has been disabled - Hunter.io API removed
+// All other data collection (domains, LinkedIn, company info) is preserved
 
 // Google Sheets Configuration
 // const SHEET_ID = '1hFgWma-Jjq31Tb2yn9U8PWgfC8KOpp0njdg3c1JEjsI'; // Your Sheet ID
@@ -91,23 +83,12 @@ const PARTIAL_EXCLUSIONS = [
     "whole foods"
 ].map(name => name.toLowerCase());
 
-// Force fresh companies
-const FORCE_FRESH_COMPANIES = new Set([
-    "fish cheeks", "fish cheeks noho", "fish cheeks - noho"
-].map(name => name.toLowerCase()));
-
-// In-memory cache
-const companyCache = new Map();
+// Force fresh companies constant removed - contact collection disabled
 
 // Helper functions
 const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error(`Operation timed out after ${ms}ms`)), ms));
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const now = () => new Date().toISOString();
-const isStale = (timestamp) => {
-    const cacheDate = new Date(timestamp);
-    const ageInDays = (new Date() - cacheDate) / (1000 * 60 * 60 * 24);
-    return ageInDays > CACHE_MAX_AGE_DAYS;
-};
 
 // Helper function to clean special characters but keep basic punctuation
 function cleanSpecialCharacters(text) {
@@ -116,45 +97,7 @@ function cleanSpecialCharacters(text) {
     return text.replace(/[^\w\s.,&'-]/g, '');
 }
 
-// List of common country-specific TLDs that aren't US-based
-const COUNTRY_TLDS = [
-    // European countries
-    '.uk', '.co.uk', '.ac.uk', '.org.uk', '.eu', '.de', '.fr', '.es', '.it', '.nl', '.be', '.dk',
-    '.se', '.no', '.fi', '.is', '.ie', '.ch', '.at', '.pt', '.pl', '.cz', '.sk', '.hu', '.ro',
-    '.bg', '.gr', '.ru', '.by', '.ua', '.hr', '.si', '.rs', '.me', '.lu', '.li', '.mt', '.cy',
-
-    // Asia Pacific
-    '.cn', '.jp', '.kr', '.hk', '.tw', '.sg', '.in', '.my', '.id', '.th', '.vn', '.ph', '.au',
-    '.nz', '.fj', '.pk', '.bd', '.kz', '.np', '.lk',
-
-    // Americas (excluding .us)
-    '.ca', '.mx', '.br', '.ar', '.cl', '.pe', '.ve', '.ec', '.bo', '.py', '.uy', '.cr',
-    '.gt', '.pa', '.do', '.cu', '.hn', '.sv', '.ni', '.bs', '.tt', '.jm', '.ht', '.pr',
-    // Note: .co is excluded as it's commonly used in the US as an alternative to .com
-
-    // Africa & Middle East
-    '.za', '.eg', '.ma', '.ng', '.ke', '.gh', '.tz', '.il', '.sa', '.ae', '.qa', '.kw', '.bh',
-    '.om', '.jo', '.lb', '.dz', '.tn', '.zm', '.zw', '.et', '.mu', '.re',
-
-    // City TLDs (mostly international)
-    '.london', '.paris', '.berlin', '.moscow', '.tokyo', '.dubai', '.amsterdam', '.vienna',
-    '.barcelona', '.istanbul', '.sydney', '.melbourne', '.toronto', '.quebec', '.rio',
-
-    // Generic internationalized TLDs
-    '.asia', '.international', '.global', '.world', '.international',
-
-    // Common second-level domains in other countries
-    '.com.au', '.co.nz', '.co.jp', '.co.uk', '.co.za', '.co.in', '.com.sg', '.com.my',
-    '.com.br', '.com.mx', '.com.ar', '.com.cn', '.com.hk', '.com.tw'
-];
-
-// Generic email patterns to deprioritize
-const GENERIC_EMAIL_PATTERNS = [
-    'info@', 'contact@', 'hello@', 'admin@', 'support@',
-    'office@', 'mail@', 'inquiry@', 'general@', 'sales@',
-    'help@', 'service@', 'hr@', 'jobs@', 'careers@',
-    'team@', 'marketing@', 'press@', 'media@', 'events@'
-];
+// Email filtering constants removed - contact collection disabled
 
 // Job title sorting priority - ordered from highest to lowest priority
 const TITLE_PRIORITY = [
@@ -755,401 +698,19 @@ export function parseCompanyAndLocation(rawName) {
     };
 }
 
-async function loadCache() {
-    // Skip loading cache if disabled
-    if (DISABLE_COMPANY_CACHE) {
-        log.info('⚠️ CACHE DISABLED: Skipping cache loading');
-        companyCache.clear();
-        return;
-    }
+// Cache loading function removed - contact collection disabled
 
-    try {
-        log.info('Loading cache from default KeyValueStore...');
-        const store = await KeyValueStore.open();
-        log.info(`Using KeyValueStore ID: ${store.id}`);
-        const data = await store.getValue('company-cache-data');
-        if (!data) {
-            log.info('No cache data found, starting with empty cache.');
-            return;
-        }
+// Cache functions removed - contact collection disabled
 
-        let loadedCount = 0;
-        let staleCount = 0;
-        let emptyEmailsCount = 0;
-        let malformedCount = 0;
-        let skippedDuplicates = 0;
-        let forcedFreshCount = 0;
-
-        // Track which companies we're loading to avoid duplicate variations
-        const loadedCompanies = new Set();
-
-        Object.entries(data).forEach(([key, value]) => {
-            // Basic validation
-            if (!value || typeof value !== 'object' || !value.timestamp) {
-                log.info(`Skipping malformed cache entry (missing timestamp): ${key}`);
-                malformedCount++;
-                return;
-            }
-
-            // Check if stale
-            if (isStale(value.timestamp)) {
-                log.info(`Skipping stale cache entry: ${key}`);
-                staleCount++;
-                return;
-            }
-
-            // Validate emails array
-            if (!value.emails || !Array.isArray(value.emails)) {
-                log.info(`Skipping malformed cache entry (invalid emails array): ${key}`);
-                malformedCount++;
-                return;
-            }
-
-            // Skip empty emails
-            if (value.emails.length === 0) {
-                log.info(`Skipping cache entry with empty emails: ${key}`);
-                emptyEmailsCount++;
-                return;
-            }
-
-            // Validate each email object
-            let hasMalformedEmail = false;
-            for (const email of value.emails) {
-                if (!email || typeof email !== 'object' || !email.email) {
-                    hasMalformedEmail = true;
-                    break;
-                }
-            }
-
-            if (hasMalformedEmail) {
-                log.info(`Skipping cache entry with malformed email objects: ${key}`);
-                malformedCount++;
-                return;
-            }
-
-            // Check for forced fresh company
-            if (FORCE_FRESH_COMPANIES.has(key.toLowerCase())) {
-                log.info(`Skipping force-fresh company: ${key}`);
-                forcedFreshCount++;
-                return;
-            }
-
-            // Add original company info if missing
-            if (!value.originalCompany) {
-                value.originalCompany = key.split(':')[0]; // Extract company from key
-            }
-
-            // Check for company variations to avoid loading duplicate data
-            const companyPart = key.split(':')[0].toLowerCase();
-            if (loadedCompanies.has(companyPart)) {
-                log.info(`Skipping duplicate company variation: ${key}`);
-                skippedDuplicates++;
-                return;
-            }
-
-            // All checks passed, add to cache
-            companyCache.set(key, value);
-            loadedCompanies.add(companyPart);
-            loadedCount++;
-        });
-
-        log.info(`Loaded ${loadedCount} fresh cache entries, skipped ${staleCount} stale, ${emptyEmailsCount} empty, ${malformedCount} malformed, ${skippedDuplicates} duplicates, ${forcedFreshCount} forced fresh.`);
-        log.info(`Cache keys: ${Array.from(companyCache.keys()).join(', ')}`);
-    } catch (error) {
-        log.error(`Error loading cache: ${error.message}`);
-    }
-}
-
-async function clearCache() {
-    try {
-        log.info('Clearing company cache...');
-
-        // Clear in-memory cache
-        companyCache.clear();
-
-        // Clear persisted cache
-        const store = await KeyValueStore.open();
-        log.info(`Clearing cache from KeyValueStore ID: ${store.id}`);
-        await store.setValue('company-cache-data', null);
-
-        log.info('Cache has been cleared successfully');
-        return true;
-    } catch (error) {
-        log.error(`Error clearing cache: ${error.message}`);
-        return false;
-    }
-}
-
-async function saveCache() {
-    // Skip saving cache if disabled
-    if (DISABLE_COMPANY_CACHE) {
-        log.info('⚠️ CACHE DISABLED: Skipping cache saving');
-        return;
-    }
-
-    try {
-        log.info(`Saving ${companyCache.size} cache entries to default KeyValueStore...`);
-
-        // Convert to object for storage
-        const cacheObject = {};
-        let entriesWithEmails = 0;
-        let entriesPerSource = {};
-
-        companyCache.forEach((value, key) => {
-            // Validate before saving
-            if (value && value.emails && Array.isArray(value.emails) && value.emails.length > 0) {
-                cacheObject[key] = value;
-                entriesWithEmails++;
-
-                // Track counts by source
-                const source = value.source || 'unknown';
-                entriesPerSource[source] = (entriesPerSource[source] || 0) + 1;
-            } else {
-                log.info(`Not saving invalid cache entry: ${key}`);
-            }
-        });
-
-        const store = await KeyValueStore.open();
-        log.info(`Saving to KeyValueStore ID: ${store.id}`);
-        await store.setValue('company-cache-data', cacheObject);
-
-        // Log stats about what was saved
-        log.info(`Cache saved successfully: ${entriesWithEmails} entries with emails out of ${companyCache.size} total entries`);
-        log.info(`Entries by source: ${JSON.stringify(entriesPerSource)}`);
-    } catch (error) {
-        log.error(`Error saving cache: ${error.message}`);
-    }
-}
+// Email processing functions removed - contact collection disabled
 
 /**
- * Checks if an email has a non-US country-specific TLD
- * @param {string} email - The email to check
- * @returns {boolean} - True if the email should be filtered out (non-US TLD), false otherwise
- */
-function hasNonUSTld(email) {
-    if (!email || typeof email !== 'string') {
-        return false; // If no email provided, don't filter
-    }
-
-    // Convert email to lowercase for case-insensitive matching
-    const lowerEmail = email.toLowerCase();
-
-    // Check if the email ends with any of the country-specific TLDs
-    return COUNTRY_TLDS.some(tld => {
-        return lowerEmail.endsWith(tld);
-    });
-}
-
-/**
- * No longer filters emails based on TLD - returns all emails
- * @param {Array} emails - Array of email objects
- * @returns {Array} - The same array of email objects
- */
-function filterNonUSEmails(emails) {
-    if (!emails || !Array.isArray(emails)) {
-        return [];
-    }
-
-    // Return all emails without filtering
-    log.info(`[TLD Filter] Keeping all ${emails.length} emails regardless of domain`);
-    return emails;
-}
-
-/**
- * Checks if an email is a generic/role-based email rather than a personal one
- * @param {string} email - The email to check
- * @returns {boolean} - True if the email is generic, false if it's likely personal
- */
-function isGenericEmail(email) {
-    if (!email || typeof email !== 'string') {
-        return true; // Consider empty emails as generic
-    }
-
-    const lowerEmail = email.toLowerCase();
-
-    // Check if it matches any generic patterns
-    return GENERIC_EMAIL_PATTERNS.some(pattern => lowerEmail.includes(pattern));
-}
-
-/**
- * Calculate a score for an email based on various factors even when job title is absent
- * @param {Object} email - Email object from Hunter API
- * @returns {number} - Score value (lower is better)
- */
-function calculateEmailScore(email) {
-    if (!email || !email.value) {
-        return 1000; // Very low score for invalid emails
-    }
-
-    let score = 500; // Base score
-
-    // Process job title if available (highest priority factor)
-    const title = email.position || email.position_raw || '';
-    if (title && title.trim()) {
-        score = getTitlePriority(title);
-        return score; // Return early if we have a title match
-    }
-
-    // No title available, use other factors
-
-    // Prefer personal emails over generic ones
-    if (isGenericEmail(email.value)) {
-        score += 200;
-    } else {
-        score -= 100;
-    }
-
-    // Prefer emails with names over unnamed contacts
-    if (email.first_name || email.last_name) {
-        score -= 50;
-    } else {
-        score += 50;
-    }
-
-    // Use confidence if available
-    if (typeof email.confidence === 'number') {
-        // Higher confidence = lower score (better)
-        score -= (email.confidence / 2);
-    }
-
-    // Prefer higher quality types
-    if (email.type) {
-        if (email.type === 'personal') {
-            score -= 75;
-        } else if (email.type === 'generic') {
-            score += 25;
-        }
-    }
-
-    return score;
-}
-
-/**
- * Process emails from Hunter API with improved prioritization and filtering
- * @param {Array|Object} emailsData - Data from Hunter API or array of emails
- * @returns {Array} - Sorted contacts with highest priority first
- */
-function processEmails(emailsData) {
-    if (!emailsData) {
-        log.info('No email data to process');
-        return [];
-    }
-
-    try {
-        // Handle both array input (from older code) and object input (API response)
-        let emails = [];
-
-        // Check if we're dealing with an Array (direct emails) or Object (full API response)
-        if (Array.isArray(emailsData)) {
-            log.info(`Processing ${emailsData.length} emails (array format)`);
-            emails = emailsData;
-        } else if (emailsData.data && emailsData.data.emails && Array.isArray(emailsData.data.emails)) {
-            log.info(`Processing ${emailsData.data.emails.length} emails for domain: ${emailsData.data.domain || 'unknown'}`);
-            emails = emailsData.data.emails;
-        } else {
-            log.info('Invalid email data format');
-            return [];
-        }
-
-        if (emails.length === 0) {
-            return [];
-        }
-
-        // Filter out non-US emails (optional, enable or disable as needed)
-        const enableTldFiltering = true; // Set to false to disable TLD filtering
-
-        let processedEmails = emails;
-        if (enableTldFiltering) {
-            // Keep track of original count
-            const originalCount = emails.length;
-
-            // Filter out emails with non-US TLDs
-            processedEmails = filterNonUSEmails(emails);
-
-            // Record filtered emails
-            const filteredCount = originalCount - processedEmails.length;
-
-            // Log TLD filtering information
-            if (filteredCount > 0) {
-                const domain = emailsData.data ? emailsData.data.domain || 'unknown' : 'unknown';
-                log.info(`[TLD Filter] Domain: ${domain} | Filtered out ${filteredCount}/${originalCount} non-US emails`);
-            }
-
-            // Use original list if filtering removed all emails
-            if (processedEmails.length === 0 && originalCount > 0) {
-                log.info(`[TLD Filter] All emails were filtered out, using unfiltered list`);
-                processedEmails = emails;
-            }
-        }
-
-        // Log the emails we're processing
-        log.info(`Processing ${processedEmails.length} email contacts`);
-        if (processedEmails.length > 0) {
-            log.info(`Sample email structure: ${JSON.stringify(processedEmails[0])}`);
-        }
-
-        // Enhanced email handling - don't filter out by email.value as this can remove valid emails
-        // Use map directly to normalize the data structure
-        const scoredEmails = processedEmails.map(email => {
-            // Handle multiple possible formats - ensure we catch all valid email formats
-            const emailValue = email.value || email.email || '';
-            const firstName = email.first_name || '';
-            const lastName = email.last_name || '';
-            const position = email.position || email.position_raw || '';
-            const confidence = email.confidence || 0;
-
-            // Skip invalid emails during mapping
-            if (!emailValue) {
-                log.debug(`Skipping email without address: ${JSON.stringify(email)}`);
-                return null;
-            }
-
-            const score = calculateEmailScore(email);
-
-            return {
-                name: (firstName && lastName) ?
-                    `${firstName} ${lastName}`.trim() :
-                    (firstName || lastName || 'Unknown'),
-                title: position || 'N/A',
-                email: emailValue,
-                confidence: confidence,
-                priority: score  // Store score for debugging and sorting
-            };
-        });
-
-        // Filter out null entries (emails without addresses) and sort by score (lower is better)
-        const validEmails = scoredEmails.filter(email => email !== null);
-
-        if (validEmails.length === 0) {
-            log.info('No valid emails found after processing');
-            return [];
-        }
-
-        // Sort by score (lower is better)
-        const sortedEmails = validEmails.sort((a, b) => a.priority - b.priority);
-
-        // Log sorted results for debugging
-        log.info(`Email priority sorting results:`);
-        sortedEmails.slice(0, 5).forEach((email, index) => {
-            const matchedTerm = email.priority < TITLE_PRIORITY.length ?
-                TITLE_PRIORITY[email.priority] : 'No match';
-            log.info(`  ${index+1}. ${email.name}, ${email.title} - Priority: ${email.priority} (${matchedTerm})`);
-        });
-
-        return sortedEmails;
-    } catch (error) {
-        log.error(`Error processing emails: ${error.message}`);
-        return [];
-    }
-}
-
-/**
- * Fetches company info from Hunter.io, potentially using a domain instead of company name.
+ * Simplified company info function - contact collection disabled, returns basic info only
  */
 async function getCompanyInfoWithSource(searchTerm, searchType = 'company', source = 'unknown') {
     // Check if searchTerm is valid based on searchType
     if (!searchTerm || searchTerm === 'Unknown' || searchTerm.startsWith('Excluded:')) {
-        log.info(`Skipping Hunter search for invalid/excluded ${searchType}: ${searchTerm || 'unknown'}`);
+        log.info(`Skipping search for invalid/excluded ${searchType}: ${searchTerm || 'unknown'}`);
         return { linkedin: 'N/A', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: `${source}_skipped` };
     }
 
@@ -1170,135 +731,27 @@ async function getCompanyInfoWithSource(searchTerm, searchType = 'company', sour
             }
         }
     }
-    // Note: Cache logic removed as DISABLE_COMPANY_CACHE is true
-    if (DISABLE_COMPANY_CACHE) {
-        log.info(`Cache is disabled - making fresh Hunter API call for ${searchType}: "${searchTerm}"`);
-    }
 
-    try {
-        log.info(`Fetching Hunter data via ${searchType} for "${searchTerm}"...`);
-        await delay(1000); // Keep a small delay
+    // Contact collection disabled - return basic structure with empty emails
+    log.info(`Contact collection disabled for ${searchType}: "${searchTerm}" - returning empty contact data`);
 
-        let apiUrl = '';
-        let searchParam = '';
+    // For domain searches, we can still return the domain
+    const resultDomain = searchType === 'domain' ? searchTerm : 'N/A';
 
-        if (searchType === 'domain') {
-            // Use Domain Search endpoint for domain search, passing domain in query
-            apiUrl = `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(searchTerm)}&limit=50&api_key=${HUNTER_API_KEY}`; // Use limit 50 for domain
-            searchParam = searchTerm; // domain is the search term
-        } else { // Default to 'company' search
-            // Use Domain Search endpoint for company search
-            const cleanCompanyForSearch = cleanSpecialCharacters(searchTerm).trim(); // Clean company name
-            apiUrl = `https://api.hunter.io/v2/domain-search?company=${encodeURIComponent(cleanCompanyForSearch)}&limit=10&api_key=${HUNTER_API_KEY}`;
-            searchParam = cleanCompanyForSearch;
-        }
+    // Return basic structure with empty emails - contact collection disabled
+    const finalResult = {
+        linkedin: 'N/A',
+        domain: resultDomain,
+        size: 'N/A',
+        emails: [], // No contact collection
+        timestamp: now(),
+        source: `${source}_contact_disabled`,
+        originalCompany: searchTerm
+    };
 
-        log.info(`Hunter API request URL (${source}, type: ${searchType}): ${apiUrl}`);
+    log.info(`Contact collection disabled for ${searchType} "${searchTerm}" (${source}): LinkedIn=${finalResult.linkedin}, Domain=${finalResult.domain}, Emails=None`);
 
-        const response = await Promise.race([
-            fetch(apiUrl, { method: 'GET', headers: { 'Content-Type': 'application/json' } }),
-            timeout(API_TIMEOUT_MS),
-        ]);
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            log.error(`Hunter API error for ${searchType} "${searchParam}" (${source}): ${response.status} - ${errorText}`);
-            if (response.status === 429) {
-                await delay(10000);
-            }
-            // Return error state instead of throwing to allow merging later
-            return { linkedin: 'Error', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: `${source}_error_${response.status}` };
-        }
-
-        const data = await response.json();
-        if (!data || !data.data) {
-             log.error(`Hunter API invalid response for ${searchType} "${searchParam}" (${source}): missing data object. Response: ${JSON.stringify(data)}`);
-            return { linkedin: 'Error', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: `${source}_error_invalid_response` };
-        }
-
-        log.info(`[Hunter Response] Successfully parsed JSON for ${searchType} "${searchParam}" (${source})`);
-
-        // --- Process results based on endpoint used ---
-        let emailsToProcess = [];
-        let resultDomain = data.data.domain || (searchType === 'domain' ? searchTerm : 'N/A');
-        let resultLinkedin = data.data.linkedin || 'N/A';
-        let resultSize = data.data.headcount || 'N/A';
-        let resultCompany = data.data.organization || (searchType === 'company' ? searchParam : 'Unknown');
-
-        if (searchType === 'company' && data.data.results && data.data.results.length > 0) {
-             // Handle multiple results from domain-search (prefer first one with emails)
-             log.info(`Hunter API returned ${data.data.results.length} potential companies for "${searchParam}"`);
-            let bestResultIndex = -1;
-            for (let i = 0; i < data.data.results.length; i++) {
-                if (data.data.results[i]?.emails?.length > 0) {
-                    bestResultIndex = i;
-                    break;
-                }
-            }
-            if (bestResultIndex >= 0) {
-                const bestResult = data.data.results[bestResultIndex];
-                log.info(`Selected company result #${bestResultIndex+1} "${bestResult.company || 'Unknown'}" with ${bestResult.emails.length} emails`);
-                emailsToProcess = bestResult.emails || [];
-                resultDomain = bestResult.domain || resultDomain;
-                resultLinkedin = bestResult.linkedin || resultLinkedin;
-                resultSize = bestResult.employees_count || bestResult.headcount || resultSize;
-                resultCompany = bestResult.company || resultCompany;
-                source = `${source}_company_result_${bestResultIndex+1}`;
-            } else {
-                log.info(`No company results with emails found for "${searchParam}", using primary data if available.`);
-                emailsToProcess = data.data.emails || []; // Use primary emails if no result had emails
-            }
-        } else if (data.data.emails && data.data.emails.length > 0) {
-             // Handles primary emails from domain-search OR emails from email-finder
-             emailsToProcess = data.data.emails;
-        }
-
-        // IMPORTANT: Add original search info to each email object BEFORE processing
-        if (emailsToProcess.length > 0) {
-            emailsToProcess = emailsToProcess.map(email => ({
-                ...email,
-                _originalCompany: resultCompany, // Company name associated with this Hunter result
-                _originalDomain: resultDomain,
-                _sourceSearchTerm: searchTerm,
-                _sourceSearchType: searchType,
-                _sourceTime: Date.now()
-            }));
-            log.info(`Added identification to ${emailsToProcess.length} emails for "${resultCompany}" (from ${searchType}: "${searchTerm}")`);
-        }
-
-        const processedEmails = processEmails(emailsToProcess);
-
-        // Log processed emails
-        if (processedEmails.length > 0) {
-            log.info(`ALL processed emails for "${resultCompany}" (from ${searchType}: "${searchTerm}"):`);
-            processedEmails.forEach((email, idx) => {
-                log.info(`  ${idx+1}. ${email.name}, ${email.title}, ${email.email} - Priority: ${email.priority}`);
-            });
-        }
-
-        const finalResult = {
-            linkedin: resultLinkedin,
-            domain: resultDomain,
-            size: resultSize,
-            emails: processedEmails,
-            timestamp: now(),
-            source: source, // Use updated source if company result was chosen
-            originalCompany: resultCompany // Store the company name identified by Hunter
-        };
-
-        const emailsLog = finalResult.emails.length > 0
-            ? finalResult.emails.map(e => `${e.name}, ${e.title}, ${e.email}`).join('; ')
-            : 'None';
-        log.info(`Found Hunter data for ${searchType} "${searchTerm}" (${source}): LinkedIn=${finalResult.linkedin}, Domain=${finalResult.domain}, Emails=${emailsLog}`);
-
-        // Cache logic removed
-
-        return finalResult;
-
-    } catch (error) {
-        log.error(`Error fetching Hunter data for ${searchType} "${searchTerm}" (${source}): ${error.message}`);
-        return { linkedin: 'Error', domain: 'N/A', size: 'N/A', emails: [], timestamp: now(), source: `${source}_error_exception` };
-    }
+    return finalResult;
 }
 
 // Function to extract potential company names from the address
@@ -1917,10 +1370,9 @@ Actor.main(async () => {
     log.info(`Using test job limit: ${inputTestJobLimit}`);
     log.info(`Using export data: ${inputExportData}`);
 
-    // Set clear cache from input
+    // Cache functionality removed - contact collection disabled
     if (input.clearCache === true) {
-        log.info('Clear cache set to true, will clear company cache');
-        await clearCache();
+        log.info('Cache functionality disabled - ignoring clearCache setting');
     }
 
     // Initialize parentCompany variable
@@ -2321,7 +1773,7 @@ Actor.main(async () => {
             // await requestQueue.drop();
         }
 
-        await saveCache(); // saveCache must be defined
+        // Cache functionality removed - contact collection disabled
 
         // Final export if any remaining jobs
         if (inputExportData && exportBatch.length > 0) { // Use global exportBatch
