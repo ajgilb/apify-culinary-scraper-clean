@@ -73,9 +73,7 @@ const EXCLUDED_COMPANIES = new Set([
     "Eurest", "Goodwin Recruiting", "HMG Plus - New York", "LSG Sky Chefs", "Major Food Group",
     "Measured HR", "One Haus", "Patrice & Associates", "Persone NYC", "Playbook Advisors",
     "Restaurant Associates", "Source One Hospitality", "Ten Five Hospitality",
-    "The Goodkind Group", "Tuttle Hospitality", "Willow Tree Recruiting",
-    // Adding Washington variants
-    "washington", "washington dc", "washington d.c.", "washington d c"
+    "The Goodkind Group", "Tuttle Hospitality", "Willow Tree Recruiting"
 ].map(name => name.toLowerCase()));
 
 // List of partial match exclusions (for companies with variations like "Whole Foods Market", etc.)
@@ -299,7 +297,7 @@ function cleanLocationText(input) {
 
     // Log when location text was cleaned
     if (cleaned !== original) {
-        console.info(`LOCATION CLEANED: "${original}" → "${cleaned}"`);
+        console.info(`LOCATION SPACING FIXED: "${original}" → "${cleaned}"`);
     }
 
     return cleaned || input;
@@ -373,9 +371,20 @@ export function parseCompanyAndLocation(rawName) {
 
     // Check for exact matches in the exclusion list
     const rawNameLower = cleanedRawName.toLowerCase();
-    if (Array.from(EXCLUDED_COMPANIES).some(excluded => rawNameLower.includes(excluded))) {
-        log.info(`Early exact exclusion match in "${rawName}"`);
-        return { name: 'Excluded', location: '' };
+
+    // More precise exclusion matching - avoid false positives
+    for (const excluded of EXCLUDED_COMPANIES) {
+        // For exact company name matches, check if it's the company name (not just location)
+        if (rawNameLower === excluded ||
+            rawNameLower.startsWith(excluded + ' ') ||
+            rawNameLower.startsWith(excluded + ',') ||
+            rawNameLower.startsWith(excluded + '-') ||
+            rawNameLower.endsWith(' ' + excluded) ||
+            rawNameLower.endsWith(',' + excluded) ||
+            rawNameLower.endsWith('-' + excluded)) {
+            log.info(`Early exact exclusion match for "${excluded}" in "${rawName}"`);
+            return { name: 'Excluded', location: '' };
+        }
     }
 
     // Step 1: Check if the input starts with a location
@@ -1538,8 +1547,52 @@ Actor.main(async () => {
                     if (locationElement.length > 0) {
                         // Get text content and handle potential spacing issues
                         fullAddress = locationElement.text().trim();
-                        // Clean the location text to fix missing spaces
-                        fullAddress = cleanLocationText(fullAddress);
+
+                        // Check if this contains company information mixed with location
+                        // If it contains the company name, try to extract just the location part
+                        if (fullAddress.includes(rawCompany) || fullAddress.includes(company)) {
+                            // Try to extract location after company name or bullet point
+                            const bulletIndex = fullAddress.indexOf('•');
+                            if (bulletIndex !== -1) {
+                                // Take everything after the bullet point
+                                fullAddress = fullAddress.substring(bulletIndex + 1).trim();
+                            } else {
+                                // Try to remove the company name and extract location
+                                let cleanedAddress = fullAddress;
+
+                                // Remove the company name if it appears at the start
+                                if (cleanedAddress.toLowerCase().startsWith(company.toLowerCase())) {
+                                    cleanedAddress = cleanedAddress.substring(company.length).trim();
+                                }
+
+                                // Look for location pattern (City, State) in the remaining text
+                                const locationMatch = cleanedAddress.match(/([A-Za-z\s]+,\s*[A-Z]{2})/);
+                                if (locationMatch) {
+                                    fullAddress = locationMatch[1].trim();
+                                } else {
+                                    // If no clear location pattern, try to extract just the city/state part
+                                    const cityStateMatch = fullAddress.match(/([A-Za-z\s]+,\s*[A-Z]{2})/);
+                                    if (cityStateMatch) {
+                                        fullAddress = cityStateMatch[1].trim();
+                                    }
+                                }
+                            }
+                        }
+
+                        // Clean the location text to fix missing spaces (only if it looks like pure location data)
+                        // Avoid cleaning if it still contains company-related terms or the company name itself
+                        const shouldClean = fullAddress &&
+                            !fullAddress.toLowerCase().includes('restaurant') &&
+                            !fullAddress.toLowerCase().includes('group') &&
+                            !fullAddress.toLowerCase().includes('hospitality') &&
+                            !fullAddress.toLowerCase().includes('food') &&
+                            !fullAddress.toLowerCase().includes(company.toLowerCase()) &&
+                            !fullAddress.includes('•') &&  // Avoid cleaning if it has bullet points (mixed data)
+                            fullAddress.length < 100;  // Avoid cleaning very long strings (likely mixed data)
+
+                        if (shouldClean) {
+                            fullAddress = cleanLocationText(fullAddress);
+                        }
                     }
                     if (!fullAddress) fullAddress = 'N/A';
 
