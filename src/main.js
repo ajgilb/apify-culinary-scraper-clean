@@ -280,6 +280,31 @@ function cleanCompanyName(input) {
     return cleaned || input;
 }
 
+function cleanLocationText(input) {
+    if (!input || typeof input !== 'string') return '';
+
+    const original = input;
+    let cleaned = input
+        // Fix missing spaces between words (e.g., "CompanyCity" -> "Company City")
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        // Fix missing spaces between company names and cities (e.g., "CompanyNew York" -> "Company New York")
+        .replace(/([a-zA-Z])([A-Z][a-z]+,?\s*[A-Z]{2})/g, '$1 $2')
+        // Fix missing spaces before state abbreviations (e.g., "CityNY" -> "City NY")
+        .replace(/([a-z])([A-Z]{2}$)/g, '$1 $2')
+        // Fix missing spaces before common multi-word city names
+        .replace(/([a-z])(New York|Los Angeles|San Francisco|Las Vegas|San Diego|San Antonio|San Jose|Kansas City|St\. Louis|Virginia Beach|Colorado Springs|Long Beach|St\. Petersburg|North Las Vegas|Salt Lake City|Fort Lauderdale|Grand Rapids|Cape Coral|Garden Grove|Newport News|Fort Wayne|St\. Paul)/gi, '$1 $2')
+        // Clean up multiple spaces
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    // Log when location text was cleaned
+    if (cleaned !== original) {
+        console.info(`LOCATION CLEANED: "${original}" → "${cleaned}"`);
+    }
+
+    return cleaned || input;
+}
+
 // Enhanced company name extractor focused on accurate company name identification
 // Exported for testing
 export function parseCompanyAndLocation(rawName) {
@@ -1506,7 +1531,17 @@ Actor.main(async () => {
                     const title = $(el).find('.job-title strong').text().trim() || 'Unknown';
                     const rawCompany = $(el).find('.text-body.text-ellipsis:not(.job-employment)').text().trim() || 'Unknown';
                     const { name: company } = parseCompanyAndLocation(rawCompany); // parseCompanyAndLocation must be defined
-                    const fullAddress = $(el).find('.text-muted.text-ellipsis').text().trim() || 'N/A';
+
+                    // Improved location extraction with better spacing handling
+                    let fullAddress = '';
+                    const locationElement = $(el).find('.text-muted.text-ellipsis');
+                    if (locationElement.length > 0) {
+                        // Get text content and handle potential spacing issues
+                        fullAddress = locationElement.text().trim();
+                        // Clean the location text to fix missing spaces
+                        fullAddress = cleanLocationText(fullAddress);
+                    }
+                    if (!fullAddress) fullAddress = 'N/A';
 
                     // Skip excluded companies entirely
                     if (company.startsWith('Excluded')) {
