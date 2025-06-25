@@ -1522,6 +1522,13 @@ Actor.main(async () => {
 
                 for (let i = 0; i < cardsToProcess; i++) {
                     const el = jobCards[i];
+
+                    // Debug: Log the HTML structure of the first few job cards
+                    if (i < 3) {
+                        console.log(`DEBUG: Job card ${i} HTML:`, $(el).html());
+                        console.log(`DEBUG: Job card ${i} attributes:`, $(el)[0].attribs);
+                    }
+
                     const jobUrl = ensureAbsoluteUrl($(el).attr('href')); // ensureAbsoluteUrl must be defined
 
                     // *** USE THE SET LOADED FROM DB ***
@@ -1537,16 +1544,56 @@ Actor.main(async () => {
                         }
                         continue;
                     }
-                    const title = $(el).find('.job-title strong').text().trim() || 'Unknown';
-                    const rawCompany = $(el).find('.text-body.text-ellipsis:not(.job-employment)').text().trim() || 'Unknown';
+                    // Extract title from data-title attribute first, fallback to old selector
+                    let title = $(el).attr('data-title') || '';
+
+                    // Fallback to old selector if data-title is not found
+                    if (!title) {
+                        title = $(el).find('.job-title strong').text().trim();
+                    }
+
+                    // Final fallback
+                    if (!title) {
+                        title = 'Unknown';
+                    }
+
+                    console.log(`DEBUG: Extracted title: "${title}" from job card`);
+
+                    // Updated to extract company name from data-entity attribute
+                    let rawCompany = $(el).attr('data-entity') || '';
+
+                    // Fallback to old selector if data-entity is not found
+                    if (!rawCompany) {
+                        rawCompany = $(el).find('.text-body.text-ellipsis:not(.job-employment)').text().trim();
+                    }
+
+                    // Final fallback
+                    if (!rawCompany) {
+                        rawCompany = 'Unknown';
+                    }
+
+                    console.log(`DEBUG: Extracted rawCompany: "${rawCompany}" from job card`);
                     const { name: company } = parseCompanyAndLocation(rawCompany); // parseCompanyAndLocation must be defined
 
-                    // Improved location extraction with better spacing handling
+                    // Updated location extraction with new selector
                     let fullAddress = '';
-                    const locationElement = $(el).find('.text-muted.text-ellipsis');
+
+                    // Try new location selector first
+                    const locationElement = $(el).find('.font-weight-normal.line-height-21');
+                    console.log(`DEBUG: New location element found: ${locationElement.length > 0}, text: "${locationElement.text().trim()}"`);
+
                     if (locationElement.length > 0) {
-                        // Get text content and handle potential spacing issues
                         fullAddress = locationElement.text().trim();
+                    } else {
+                        // Fallback to old selector
+                        const oldLocationElement = $(el).find('.text-muted.text-ellipsis');
+                        console.log(`DEBUG: Fallback location element found: ${oldLocationElement.length > 0}, text: "${oldLocationElement.text().trim()}"`);
+                        if (oldLocationElement.length > 0) {
+                            fullAddress = oldLocationElement.text().trim();
+                        }
+                    }
+
+                    if (fullAddress) {
 
                         // Check if this contains company information mixed with location
                         // If it contains the company name, try to extract just the location part
@@ -1604,13 +1651,40 @@ Actor.main(async () => {
                         continue; // Go to the next job card, don't add this one to listings
                     }
 
+                    // Extract apply URL
+                    const applyElement = $(el).find('a.btn.btn-primary.apply-button');
+                    const applyUrl = applyElement.length > 0 ? applyElement.attr('href') : 'N/A';
+                    console.log(`DEBUG: Apply URL found: "${applyUrl}"`);
+
                     listings.push({
                         url: jobUrl,
                         title,
                         company,
                         location: fullAddress,
                         searchLocation: cleanCompanyName(fullAddress), // cleanCompanyName must be defined
-                        salary: $(el).find('.job-employment').text().trim() || 'N/A'
+                        applyUrl: applyUrl,
+                        salary: (() => {
+                            // Try to find salary in span elements that contain "Salary" text
+                            let salaryText = '';
+
+                            // Look for spans containing salary information
+                            $(el).find('span').each((_, spanEl) => {
+                                const spanText = $(spanEl).text().trim();
+                                if (spanText.toLowerCase().includes('salary') || spanText.match(/\$[\d,k-]+/)) {
+                                    salaryText = spanText;
+                                    return false; // Break out of each loop
+                                }
+                            });
+
+                            // Fallback to old selector
+                            if (!salaryText) {
+                                const oldSalaryElement = $(el).find('.job-employment');
+                                salaryText = oldSalaryElement.text().trim();
+                            }
+
+                            console.log(`DEBUG: Salary found: "${salaryText}"`);
+                            return salaryText || 'N/A';
+                        })()
                     });
                 }
 
@@ -1631,7 +1705,116 @@ Actor.main(async () => {
                                 continue;
                             }
                             const $detail = cheerio.load(body);
+
+                            // Debug: Log some of the HTML structure of the detail page
+                            console.log(`DEBUG: Detail page title: "${$detail('title').text()}"`);
+                            console.log(`DEBUG: Detail page has ${$detail('div').length} div elements`);
+                            console.log(`DEBUG: Detail page has ${$detail('span').length} span elements`);
+                            console.log(`DEBUG: Detail page has ${$detail('a').length} anchor elements`);
+
+                            // Debug: Look for location-related elements
+                            const allDivs = $detail('div[class*="font-weight"], div[class*="line-height"]');
+                            console.log(`DEBUG: Divs with font-weight or line-height classes: ${allDivs.length}`);
+                            allDivs.each((i, el) => {
+                                if (i < 3) { // Only log first 3 to avoid spam
+                                    console.log(`DEBUG: Div ${i} classes: "${$detail(el).attr('class')}", text: "${$detail(el).text().trim()}"`);
+                                }
+                            });
+
+                            // Debug: Look for salary-related spans
+                            const salarySpans = $detail('span');
+                            console.log(`DEBUG: Total spans found: ${salarySpans.length}`);
+                            salarySpans.each((i, el) => {
+                                const spanText = $detail(el).text().trim();
+                                if (spanText.toLowerCase().includes('salary') || spanText.match(/\$[\d,k-]+/) || spanText.toLowerCase().includes('full time')) {
+                                    console.log(`DEBUG: Potential salary span ${i}: "${spanText}"`);
+                                }
+                            });
+
+                            // Debug: Look for apply button elements
+                            const applyButtons = $detail('a[class*="btn"], a[class*="apply"]');
+                            console.log(`DEBUG: Potential apply buttons found: ${applyButtons.length}`);
+                            applyButtons.each((i, el) => {
+                                if (i < 3) { // Only log first 3
+                                    console.log(`DEBUG: Apply button ${i} classes: "${$detail(el).attr('class')}", href: "${$detail(el).attr('href')}", text: "${$detail(el).text().trim()}"`);
+                                }
+                            });
+
                             const jobDetailsText = $detail('#job-details .text-muted div').text().trim() || 'N/A';
+
+                            // Extract title from job detail page if not found in listing
+                            const detailTitleElement = $detail('h1.my-0.font-size-24.font-weight-bold');
+                            if (detailTitleElement.length > 0) {
+                                const detailTitle = detailTitleElement.text().trim();
+                                console.log(`DEBUG: Found title on detail page: "${detailTitle}"`);
+
+                                // Update the listing title if it was Unknown and we found a better one
+                                if (listing.title === 'Unknown' && detailTitle) {
+                                    listing.title = detailTitle;
+                                    console.log(`DEBUG: Updated listing title from "Unknown" to "${detailTitle}"`);
+                                }
+                            }
+
+                            // Extract company name from job detail page if not found in listing
+                            let detailPageCompany = null;
+                            const businessNameElement = $detail('a.business-name.text-primary.text-decoration-none');
+                            if (businessNameElement.length > 0) {
+                                detailPageCompany = businessNameElement.text().trim();
+                                console.log(`DEBUG: Found company name on detail page: "${detailPageCompany}"`);
+
+                                // Update the listing company if it was Unknown and we found a better one
+                                if (listing.company === 'Unknown' && detailPageCompany) {
+                                    const { name: updatedCompany } = parseCompanyAndLocation(detailPageCompany);
+                                    listing.company = updatedCompany;
+                                    console.log(`DEBUG: Updated listing company from "Unknown" to "${updatedCompany}"`);
+                                }
+                            }
+
+                            // Extract location from job detail page
+                            const detailLocationElement = $detail('.font-weight-normal.line-height-21');
+                            console.log(`DEBUG: Detail page location elements found: ${detailLocationElement.length}`);
+                            if (detailLocationElement.length > 0) {
+                                const detailLocation = detailLocationElement.text().trim();
+                                console.log(`DEBUG: Detail page location text: "${detailLocation}"`);
+                                if (detailLocation && (listing.location === 'N/A' || !listing.location)) {
+                                    listing.location = detailLocation;
+                                    console.log(`DEBUG: Updated location from detail page: "${detailLocation}"`);
+                                }
+                            } else {
+                                // Debug: Let's see what location-related elements exist
+                                console.log(`DEBUG: Looking for alternative location selectors...`);
+                                const altLocation1 = $detail('div[class*="font-weight"]');
+                                const altLocation2 = $detail('div[class*="line-height"]');
+                                console.log(`DEBUG: Elements with font-weight class: ${altLocation1.length}`);
+                                console.log(`DEBUG: Elements with line-height class: ${altLocation2.length}`);
+                                if (altLocation1.length > 0) {
+                                    console.log(`DEBUG: First font-weight element text: "${altLocation1.first().text().trim()}"`);
+                                }
+                            }
+
+                            // Extract salary from job detail page
+                            let detailSalary = '';
+                            $detail('span').each((_, spanEl) => {
+                                const spanText = $detail(spanEl).text().trim();
+                                if (spanText.toLowerCase().includes('salary') || spanText.match(/\$[\d,k-]+/)) {
+                                    detailSalary = spanText;
+                                    return false; // Break out of each loop
+                                }
+                            });
+                            if (detailSalary && (listing.salary === 'N/A' || !listing.salary)) {
+                                listing.salary = detailSalary;
+                                console.log(`DEBUG: Updated salary from detail page: "${detailSalary}"`);
+                            }
+
+                            // Extract apply URL from job detail page
+                            const detailApplyElement = $detail('a.btn.btn-primary.apply-button');
+                            if (detailApplyElement.length > 0) {
+                                const detailApplyUrl = detailApplyElement.attr('href');
+                                if (detailApplyUrl && (listing.applyUrl === 'N/A' || !listing.applyUrl)) {
+                                    listing.applyUrl = detailApplyUrl;
+                                    console.log(`DEBUG: Updated apply URL from detail page: "${detailApplyUrl}"`);
+                                }
+                            }
 
                             let parentCompany = null;
                             const partOfElement = $detail('p:contains("Part of")');
@@ -1718,6 +1901,7 @@ Actor.main(async () => {
                                 location: String(listing.location || ''),
                                 salary: String(listing.salary || ''),
                                 url: String(listing.url || ''),
+                                applyUrl: String(listing.applyUrl || ''),
                                 searchLocation: String(listing.searchLocation || ''),
                                 jobDetails: truncateText(jobDetailsText), // truncateText must be defined
                                 leadership: leadership.length > 0 ? [...leadership] : 'N/A',
