@@ -58,6 +58,11 @@ pool.on('error', (err) => {
 // Create a global array to store jobs - used for global state only
 let allProcessedJobs = [];
 
+// Company URL cache to avoid duplicate SearchAPI calls
+// Maps company name (lowercase) -> { url, domain, timestamp }
+const companyUrlCache = new Map();
+const CACHE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
 // Contact collection has been disabled - Hunter.io API removed
 // All other data collection (domains, LinkedIn, company info) is preserved
 
@@ -1697,7 +1702,7 @@ Actor.main(async () => {
                         log.debug(`Attempting job ${state.attemptedCount}: ${listing.url}`); // Add debug log
 
                         try {
-                            await delay(inputTestMode ? 1000 : 2000); // delay must be defined
+                            await delay(inputTestMode ? 500 : 500); // Reduced delay for faster scraping
                             const response = await fetch(listing.url, { method: 'GET' });
                             const body = await response.text();
                             if (!response.ok) {
@@ -2055,6 +2060,7 @@ Actor.main(async () => {
             await handleBatchExport(); // Should use and clear global exportBatch
         }
         log.info(`Scraping completed! Total jobs processed: ${state ? state.processedCount : 'N/A'}`);
+        log.info(`Company URL Cache Statistics: ${companyUrlCache.size} companies cached`);
         // Optionally log dataset size
         // const finalData = await existingDataset.getData();
         // log.info(`Final dataset contents: ${finalData.items.length} items`);
@@ -2249,13 +2255,18 @@ async function testDatabaseConnection() {
 
 // *** ADDED FUNCTION ***
 // Helper function to load existing job URLs from the database
+// Only loads jobs from the last 2 months to improve performance
 async function loadExistingJobUrlsFromDB() {
-    log.info('Loading existing job URLs from database...');
+    log.info('Loading existing job URLs from database (last 2 months only)...');
     const existingUrls = new Set();
     let client;
     try {
         client = await pool.connect();
-        const result = await client.query('SELECT url FROM culinary_jobs');
+        // Only check jobs from the last 2 months - older jobs are unlikely to still be posted
+        const result = await client.query(
+            `SELECT url FROM culinary_jobs
+             WHERE date_added >= NOW() - INTERVAL '2 months'`
+        );
         if (result.rows && result.rows.length > 0) {
             result.rows.forEach(row => {
                 if (row.url) {
@@ -2263,7 +2274,7 @@ async function loadExistingJobUrlsFromDB() {
                 }
             });
         }
-        log.info(`Loaded ${existingUrls.size} existing job URLs from the database.`);
+        log.info(`Loaded ${existingUrls.size} existing job URLs from the database (last 2 months).`);
         return existingUrls;
     } catch (error) {
         log.error('Failed to load existing job URLs from database:', error);
@@ -2315,16 +2326,43 @@ import getWebsiteUrlFromSearchAPI from './search_api.js';
 /**
  * Uses SearchAPI.io to find the website URL for a business name.
  * This function replaces the previous Google Places API implementation.
+ * Now includes caching to avoid duplicate API calls.
  */
 async function getWebsiteUrlFromGoogle(companyName, _location) {
-    // _location parameter is kept for backward compatibility but not used
-    // For backward compatibility, we keep the same function name
-    // but now it uses SearchAPI.io instead of Google Places API
-    console.info(`Using SearchAPI instead of Google Places for "${companyName}"`);
-    return await getWebsiteUrlFromSearchAPI(companyName);
+    if (!companyName || companyName === 'Unknown' || companyName.startsWith('Excluded:')) {
+        return null;
+    }
 
-    // The old Google Places API code has been removed
-    // If you need to revert, check version control history
+    // Check cache first
+    const cacheKey = companyName.toLowerCase().trim();
+    const cached = companyUrlCache.get(cacheKey);
+
+    if (cached) {
+        const age = Date.now() - cached.timestamp;
+        if (age < CACHE_EXPIRY_MS) {
+            console.info(`CACHE HIT: Using cached URL for "${companyName}": ${cached.url}`);
+            return cached.url;
+        } else {
+            console.info(`CACHE EXPIRED: Removing stale entry for "${companyName}"`);
+            companyUrlCache.delete(cacheKey);
+        }
+    }
+
+    // Cache miss - make API call
+    console.info(`CACHE MISS: Using SearchAPI for "${companyName}"`);
+    const url = await getWebsiteUrlFromSearchAPI(companyName);
+
+    // Store in cache if we got a result
+    if (url) {
+        companyUrlCache.set(cacheKey, {
+            url: url,
+            domain: getDomainFromUrl(url),
+            timestamp: Date.now()
+        });
+        console.info(`CACHED: Stored URL for "${companyName}" (cache size: ${companyUrlCache.size})`);
+    }
+
+    return url;
 }
 
 // *** NEW HELPER FUNCTIONS END ***
